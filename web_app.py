@@ -937,7 +937,9 @@ def _download_worker(task_id, q, celebrity, opts):
 
         dl = ImageDownloader(db, celebrity, ",".join(sources))
         with tasks_lock:
-            tasks[task_id]["downloader"] = dl
+            task = tasks.get(task_id)
+            if task:
+                task["downloader"] = dl
 
         def pcb(cur, tot, stats):
             q.put({"type": "progress", "current": cur, "total": tot, "stats": stats})
@@ -976,7 +978,7 @@ def _batch_worker(task_id, q, names, opts):
                         break
             q.put({"type": "log",
                     "msg": f"━━━ 批次 {i+1}/{len(names)}: {name} ━━━", "tag": "info"})
-            _download_worker(task_id + f"_{i}", q, name, opts)
+            _download_worker(task_id, q, name, opts)
             if i < len(names) - 1:
                 time.sleep(1)
         q.put({"type": "done", "stats": {"batch": True, "total": len(names)}})
