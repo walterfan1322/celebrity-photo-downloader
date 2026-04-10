@@ -9,6 +9,16 @@ Bulk download celebrity photos from Bing Image Search with intelligent deduplica
   1. **URL check** - Skips already-downloaded URLs (instant, database lookup)
   2. **MD5 hash** - Catches exact binary duplicates across different URLs
   3. **Perceptual hash (pHash)** - Catches resized/recompressed variants (hamming distance < 8)
+- **TikTok-style video maker** - 6 modern video templates:
+  - Velocity (slow zoom + white flash + motion blur)
+  - Parallax 3D (foreground zoom + background pan + depth blur)
+  - Film VHS (grain + light leaks + scan lines + warm color shift)
+  - RGB Glitch (channel split + glitch stripes + high contrast)
+  - Cinema (2.39:1 letterbox + teal-orange grading + typewriter subtitles)
+  - Heartbeat (120 BPM sine-wave zoom pulse + vignette breathing)
+- **YouTube downloader** - Search and download YouTube videos (via yt-dlp)
+- **Celebrity alias system** - Merge different names/languages for the same person
+- **Photo usage tracking** - Avoids re-selecting previously used photos
 - **Batch download** - Queue multiple celebrities in one go
 - **Size filtering** - Filter by image size (any / large >500px / extra-large >1024px)
 - **Auto-organized folders** - Each celebrity gets their own subfolder
@@ -17,32 +27,18 @@ Bulk download celebrity photos from Bing Image Search with intelligent deduplica
   - **Desktop GUI** (`celebrity_downloader.py`) - tkinter-based, runs locally
   - **Web GUI** (`web_app.py`) - Flask-based, accessible from any device on the LAN
 
-## Screenshots
-
-### Web Interface
-The web version features a responsive UI with:
-- Real-time download progress via Server-Sent Events (SSE)
-- Image gallery with lightbox viewer
-- Download statistics dashboard
-- Batch download support
-
-### Desktop Interface
-The desktop version provides:
-- Threaded downloads (non-blocking UI)
-- Scrollable log output
-- Settings persistence
-
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.8+
 - Windows (batch scripts are Windows-only, but Python scripts work cross-platform)
+- FFmpeg (required for video maker)
 
 ### Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/celebrity-photo-downloader.git
+git clone https://github.com/walterfan1322/celebrity-photo-downloader.git
 cd celebrity-photo-downloader
 pip install -r requirements.txt
 ```
@@ -70,7 +66,8 @@ Configuration is done via environment variables (or just edit the defaults in th
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOWNLOAD_ROOT` | `D:\CelebrityPhotos` | Where photos are saved |
+| `DOWNLOAD_ROOT` | `./Photos` | Where photos are saved |
+| `YT_ROOT` | `./YouTube` | Where YouTube downloads are saved |
 | `PORT` | `5000` | Web server port |
 
 See `.env.example` for all available variables.
@@ -81,7 +78,7 @@ If the server's firewall blocks the web port, you can use `connect.py` to create
 
 ```bash
 # Set connection info
-export SSH_HOST=192.168.100.xxx
+export SSH_HOST=your.server.ip
 export SSH_USER=your_username
 export SSH_PASS=your_password
 
@@ -94,15 +91,22 @@ This forwards `localhost:5000` to the remote server, and also allows other LAN d
 
 ```
 celebrity-photo-downloader/
+├── web_app.py               # Web GUI (Flask + SSE) with YouTube downloader
+├── video_maker.py           # TikTok-style video templates
 ├── celebrity_downloader.py  # Desktop GUI (tkinter)
-├── web_app.py               # Web GUI (Flask + SSE)
 ├── connect.py               # SSH tunnel client
+├── verify.py                # Environment verification script
 ├── requirements.txt         # Python dependencies
 ├── setup.bat                # Windows installer script
 ├── run.bat                  # Launch desktop version
 ├── run_web.bat              # Launch web version
+├── launch.bat               # Launch desktop (background)
+├── _launch_web.bat          # Launch web (background)
 ├── connect.bat              # Launch SSH tunnel
-├── deploy.bat               # Deploy to remote server
+├── setup/                   # Setup helper scripts
+│   ├── install_tailscale.bat
+│   ├── run_install.bat
+│   └── start_web.bat
 └── .env.example             # Environment variable template
 ```
 
@@ -110,9 +114,11 @@ celebrity-photo-downloader/
 
 - **Backend**: Python, Flask, Waitress (production WSGI server)
 - **Frontend**: Vanilla HTML/CSS/JS (embedded in web_app.py)
-- **Image Processing**: Pillow, imagehash
+- **Image Processing**: Pillow, imagehash, OpenCV (face detection)
+- **Video**: FFmpeg, NumPy (frame composition)
 - **Database**: SQLite
 - **Scraping**: requests + regex parsing (Bing, Google, DuckDuckGo, Pinterest)
+- **YouTube**: yt-dlp
 - **Remote Access**: paramiko (SSH tunneling)
 
 ## License

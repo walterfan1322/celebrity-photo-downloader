@@ -81,6 +81,8 @@ def main():
     # 建立 SSH 連線
     print(f"連線到 {SSH_HOST}...")
     ssh = paramiko.SSHClient()
+    # NOTE: AutoAddPolicy accepts any host key. For production use,
+    # consider paramiko.RejectPolicy() with a known_hosts file.
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         ssh.connect(SSH_HOST, SSH_PORT, SSH_USER, SSH_PASS, timeout=10)
