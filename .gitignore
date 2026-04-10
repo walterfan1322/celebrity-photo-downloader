@@ -21,6 +21,10 @@ YouTube/
 /photos/
 /CelebrityPhotos/
 
+# AI models (large binary files)
+models/
+*.onnx
+
 # Deployment (may contain credentials)
 deploy.bat
 
