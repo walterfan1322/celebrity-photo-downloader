@@ -865,7 +865,7 @@ def api_progress(task_id):
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _download_worker(task_id, q, celebrity, opts):
+def _download_worker(task_id, q, celebrity, opts, is_batch=False):
     try:
         sf = SIZE_FILTERS.get(opts.get("size", "any"), "")
         if opts.get("face_only"):
@@ -962,7 +962,10 @@ def _download_worker(task_id, q, celebrity, opts):
         for kw in keywords_used_this_run:
             db.add_used_keyword(celebrity, kw, ",".join(sources), stats.get("downloaded", 0))
 
-        q.put({"type": "done", "stats": stats})
+        if is_batch:
+            q.put({"type": "batch_one_done", "celebrity": celebrity, "stats": stats})
+        else:
+            q.put({"type": "done", "stats": stats})
 
     except Exception as e:
         q.put({"type": "error", "msg": str(e)})
@@ -978,7 +981,7 @@ def _batch_worker(task_id, q, names, opts):
                         break
             q.put({"type": "log",
                     "msg": f"━━━ 批次 {i+1}/{len(names)}: {name} ━━━", "tag": "info"})
-            _download_worker(task_id, q, name, opts)
+            _download_worker(task_id, q, name, opts, is_batch=True)
             if i < len(names) - 1:
                 time.sleep(1)
         q.put({"type": "done", "stats": {"batch": True, "total": len(names)}})
@@ -2579,9 +2582,13 @@ function listenSSE(taskId) {
       case 'progress':
         updateProgress(d);
         break;
+      case 'batch_one_done':
+        addLog('━━ ' + (d.celebrity||'') + ' 完成（新增 ' + (d.stats&&d.stats.downloaded||0) + ' 張）━━', 'info');
+        loadCelebs();
+        break;
       case 'done':
         eventSource.close(); eventSource = null;
-        addLog('━━━ 完成 ━━━', 'info');
+        addLog('━━━ 全部完成 ━━━', 'info');
         setUI(false);
         loadCelebs();
         break;
