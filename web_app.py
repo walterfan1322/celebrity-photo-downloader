@@ -176,6 +176,181 @@ class BingImageScraper:
 
 
 # ══════════════════════════════════════════════════════════
+#  Google 圖片搜尋
+# ══════════════════════════════════════════════════════════
+class GoogleImageScraper:
+    def __init__(self):
+        self.session = http_requests.Session()
+        self.session.headers.update(HEADERS)
+
+    def search(self, keyword, max_num=100, size_filter="", callback=None):
+        urls, seen = [], set()
+        start, empty = 0, 0
+        while len(urls) < max_num and empty < 3:
+            try:
+                page = self._fetch(keyword, start, size_filter)
+            except Exception:
+                empty += 1; start += 20; time.sleep(1); continue
+            new = 0
+            for u in page:
+                if u not in seen:
+                    seen.add(u); urls.append(u); new += 1
+                    if callback:
+                        callback(f"Google 搜尋中... 找到 {len(urls)} 個連結")
+                    if len(urls) >= max_num:
+                        break
+            empty = 0 if new else empty + 1
+            start += 20; time.sleep(0.5)
+        return urls[:max_num]
+
+    def _fetch(self, keyword, start, size_filter=""):
+        tbs = ""
+        if "large" in size_filter:
+            tbs = "isz:l"
+        elif "wallpaper" in size_filter:
+            tbs = "isz:lt,islt:4mp"
+        params = {"q": keyword, "tbm": "isch", "start": start,
+                  "ijn": str(start // 20)}
+        if tbs:
+            params["tbs"] = tbs
+        resp = self.session.get(
+            "https://www.google.com/search", params=params, timeout=15)
+        resp.raise_for_status()
+        result = []
+        # 從頁面中解析圖片 URL 陣列 ["url", w, h]
+        for m in re.finditer(
+            r'\["(https?://[^"]{10,})",[0-9]+,[0-9]+\]', resp.text
+        ):
+            u = m.group(1).replace("\\u003d", "=").replace("\\u0026", "&")
+            if not any(x in u for x in (
+                "google.com", "gstatic.com", "googleapis.com",
+                "googleusercontent.com", "ytimg.com",
+            )):
+                result.append(u)
+        # 備用: "ou" 欄位
+        if not result:
+            for m in re.finditer(r'"ou":"(https?://[^"]+)"', resp.text):
+                result.append(m.group(1))
+        return result
+
+
+# ══════════════════════════════════════════════════════════
+#  DuckDuckGo 圖片搜尋
+# ══════════════════════════════════════════════════════════
+class DuckDuckGoImageScraper:
+    def __init__(self):
+        self.session = http_requests.Session()
+        self.session.headers.update(HEADERS)
+
+    def search(self, keyword, max_num=100, size_filter="", callback=None):
+        # 取得 vqd token
+        try:
+            resp = self.session.get(
+                "https://duckduckgo.com/",
+                params={"q": keyword, "iax": "images", "ia": "images"},
+                timeout=15,
+            )
+            vqd_m = re.search(r'vqd=["\']([^"\']+)', resp.text)
+            if not vqd_m:
+                return []
+            vqd = vqd_m.group(1)
+        except Exception:
+            return []
+
+        sz = ""
+        if "large" in size_filter:
+            sz = "Large"
+        elif "wallpaper" in size_filter:
+            sz = "Wallpaper"
+
+        urls, seen = [], set()
+        f_param = f",size,{sz},,," if sz else ",,,,,"
+        next_url = (
+            f"https://duckduckgo.com/i.js?l=us-en&o=json"
+            f"&q={keyword}&vqd={vqd}&f={f_param}&p=1"
+        )
+        empty = 0
+        while len(urls) < max_num and empty < 3 and next_url:
+            try:
+                resp = self.session.get(next_url, timeout=15)
+                data = resp.json()
+            except Exception:
+                empty += 1; time.sleep(1); continue
+            results = data.get("results", [])
+            if not results:
+                break
+            new = 0
+            for item in results:
+                img = item.get("image", "")
+                if img and img not in seen:
+                    seen.add(img); urls.append(img); new += 1
+                    if callback:
+                        callback(f"DuckDuckGo 搜尋中... 找到 {len(urls)} 個連結")
+                    if len(urls) >= max_num:
+                        break
+            empty = 0 if new else empty + 1
+            nxt = data.get("next")
+            next_url = ("https://duckduckgo.com" + nxt) if nxt else None
+            time.sleep(0.4)
+        return urls[:max_num]
+
+
+# ══════════════════════════════════════════════════════════
+#  Pinterest 圖片搜尋（實驗性，結果可能有限）
+# ══════════════════════════════════════════════════════════
+class PinterestImageScraper:
+    def __init__(self):
+        self.session = http_requests.Session()
+        self.session.headers.update(HEADERS)
+
+    def search(self, keyword, max_num=100, size_filter="", callback=None):
+        urls, seen = [], set()
+        try:
+            resp = self.session.get(
+                "https://www.pinterest.com/search/pins/",
+                params={"q": keyword},
+                timeout=15,
+            )
+            # Pinterest 在初始 HTML 中嵌入 JSON 圖片資料
+            # 嘗試取得 originals 尺寸
+            for m in re.finditer(
+                r'"url":"(https://i\.pinimg\.com/originals/[^"]+)"', resp.text
+            ):
+                u = m.group(1)
+                if u not in seen:
+                    seen.add(u); urls.append(u)
+                    if callback:
+                        callback(f"Pinterest 搜尋中... 找到 {len(urls)} 個連結")
+                    if len(urls) >= max_num:
+                        break
+            # 備用: 取得較大尺寸圖片
+            if len(urls) < max_num:
+                for m in re.finditer(
+                    r'"url":"(https://i\.pinimg\.com/(?:736x|564x)/[^"]+)"',
+                    resp.text,
+                ):
+                    u = m.group(1)
+                    if u not in seen:
+                        seen.add(u); urls.append(u)
+                        if callback:
+                            callback(f"Pinterest 搜尋中... 找到 {len(urls)} 個連結")
+                        if len(urls) >= max_num:
+                            break
+        except Exception:
+            pass
+        return urls[:max_num]
+
+
+# ── 爬蟲對照表 ────────────────────────────────────────────
+SCRAPERS = {
+    "bing": BingImageScraper,
+    "google": GoogleImageScraper,
+    "duckduckgo": DuckDuckGoImageScraper,
+    "pinterest": PinterestImageScraper,
+}
+
+
+# ══════════════════════════════════════════════════════════
 #  圖片下載器
 # ══════════════════════════════════════════════════════════
 def sanitize_name(name):
@@ -429,22 +604,41 @@ def _download_worker(task_id, q, celebrity, opts):
             sf += "+filterui:face-face"
 
         max_num = int(opts.get("count", 100))
+        sources = opts.get("sources", ["bing"])
 
-        q.put({"type": "log", "msg": f"搜尋: {keyword} (數量: {max_num})", "tag": "info"})
+        # 從多個來源搜尋
+        all_urls = []
+        seen_urls = set()
+        for src in sources:
+            scraper_cls = SCRAPERS.get(src)
+            if not scraper_cls:
+                continue
+            src_label = {"bing": "Bing", "google": "Google",
+                         "duckduckgo": "DuckDuckGo", "pinterest": "Pinterest"}.get(src, src)
+            q.put({"type": "log", "msg": f"從 {src_label} 搜尋: {keyword}", "tag": "info"})
+            try:
+                scraper = scraper_cls()
+                urls = scraper.search(
+                    keyword, max_num, sf,
+                    callback=lambda msg: q.put({"type": "log", "msg": msg, "tag": "info"}),
+                )
+                new = 0
+                for u in urls:
+                    if u not in seen_urls:
+                        seen_urls.add(u); all_urls.append(u); new += 1
+                q.put({"type": "log", "msg": f"{src_label}: 找到 {new} 個新連結", "tag": "info"})
+            except Exception as e:
+                q.put({"type": "log", "msg": f"{src_label} 搜尋失敗: {e}", "tag": "error"})
 
-        scraper = BingImageScraper()
-        urls = scraper.search(
-            keyword, max_num, sf,
-            callback=lambda msg: q.put({"type": "log", "msg": msg, "tag": "info"}),
-        )
+        urls = all_urls
         if not urls:
             q.put({"type": "log", "msg": "未找到任何圖片", "tag": "error"})
             q.put({"type": "done", "stats": {}})
             return
 
-        q.put({"type": "log", "msg": f"找到 {len(urls)} 個連結，開始下載...", "tag": "info"})
+        q.put({"type": "log", "msg": f"共找到 {len(urls)} 個連結，開始下載...", "tag": "info"})
 
-        dl = ImageDownloader(db, celebrity, "bing")
+        dl = ImageDownloader(db, celebrity, ",".join(sources))
         with tasks_lock:
             tasks[task_id]["downloader"] = dl
 
@@ -584,6 +778,13 @@ justify-content:center;align-items:center;cursor:zoom-out}
   <input type="text" id="inp-name" placeholder="例: Taylor Swift, IU, 周杰倫">
 </div>
 <div class="row">
+  <label>圖片來源</label>
+  <label class="cb"><input type="checkbox" id="src-bing" checked> Bing</label>
+  <label class="cb"><input type="checkbox" id="src-google"> Google</label>
+  <label class="cb"><input type="checkbox" id="src-ddg"> DuckDuckGo</label>
+  <label class="cb"><input type="checkbox" id="src-pinterest"> Pinterest</label>
+</div>
+<div class="row">
   <label>下載數量</label>
   <input type="number" id="inp-count" value="100" min="10" max="1000" step="10">
   <label>圖片大小</label>
@@ -702,8 +903,15 @@ async function startBatch() {
 }
 
 function getOpts(celebrity) {
+  const sources = [];
+  if (document.getElementById('src-bing').checked) sources.push('bing');
+  if (document.getElementById('src-google').checked) sources.push('google');
+  if (document.getElementById('src-ddg').checked) sources.push('duckduckgo');
+  if (document.getElementById('src-pinterest').checked) sources.push('pinterest');
+  if (!sources.length) sources.push('bing');
   return {
     celebrity,
+    sources,
     count: parseInt(document.getElementById('inp-count').value) || 100,
     size: document.getElementById('sel-size').value,
     append_photo: document.getElementById('chk-photo').checked,
