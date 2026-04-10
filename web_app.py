@@ -62,6 +62,8 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_ROOT = os.environ.get("DOWNLOAD_ROOT", os.path.join(APP_DIR, "Photos"))
 VIDEO_ROOT = os.environ.get("VIDEO_ROOT", os.path.join(APP_DIR, "Videos"))
 YT_ROOT = os.environ.get("YT_ROOT", os.path.join(APP_DIR, "YouTube"))
+YT_DOWNLOADS = os.path.join(YT_ROOT, "downloads")
+YT_EXTRACTS = os.path.join(YT_ROOT, "extracts")
 DATA_DIR = os.path.join(APP_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "history.db")
 PHASH_THRESHOLD = 8
@@ -87,6 +89,35 @@ SIZE_FILTERS = {
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(DOWNLOAD_ROOT, exist_ok=True)
 os.makedirs(VIDEO_ROOT, exist_ok=True)
+
+
+def _migrate_yt_flat_to_structured():
+    """一次性遷移：將 YouTube/ 根目錄的平放檔案搬到 downloads/_unsorted/"""
+    if not os.path.isdir(YT_ROOT):
+        os.makedirs(YT_DOWNLOADS, exist_ok=True)
+        os.makedirs(YT_EXTRACTS, exist_ok=True)
+        return
+    # 如果已經有 downloads/ 子目錄就跳過
+    if os.path.isdir(YT_DOWNLOADS):
+        return
+    exts = {".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus"}
+    flat_files = [f for f in os.listdir(YT_ROOT)
+                  if os.path.isfile(os.path.join(YT_ROOT, f))
+                  and os.path.splitext(f)[1].lower() in exts]
+    os.makedirs(YT_DOWNLOADS, exist_ok=True)
+    os.makedirs(YT_EXTRACTS, exist_ok=True)
+    if not flat_files:
+        return
+    unsorted = os.path.join(YT_DOWNLOADS, "_unsorted")
+    os.makedirs(unsorted, exist_ok=True)
+    for f in flat_files:
+        src = os.path.join(YT_ROOT, f)
+        dst = os.path.join(unsorted, f)
+        os.rename(src, dst)
+    logging.info("Migrated %d YT files to downloads/_unsorted/", len(flat_files))
+
+
+_migrate_yt_flat_to_structured()
 
 
 # ══════════════════════════════════════════════════════════
@@ -1542,12 +1573,19 @@ def api_yt_download():
     url = (data.get("url") or "").strip()
     title = (data.get("title") or "video").strip()
     quality = data.get("quality", "bestvideo[height<=720]+bestaudio/best")
+    keyword = (data.get("keyword") or "").strip()
     audio_only = "bestaudio" in quality and "bestvideo" not in quality
 
     if not url:
         return jsonify({"error": "請提供影片網址"}), 400
 
-    os.makedirs(YT_ROOT, exist_ok=True)
+    # 依搜尋關鍵字歸檔到對應人名子資料夾
+    if keyword:
+        person_folder = sanitize_name(resolve_celebrity(keyword))
+    else:
+        person_folder = "_unsorted"
+    dl_dir = os.path.join(YT_DOWNLOADS, person_folder)
+    os.makedirs(dl_dir, exist_ok=True)
 
     task_id = str(uuid.uuid4())[:8]
     q = Queue()
@@ -1577,7 +1615,7 @@ def api_yt_download():
 
             ydl_opts = {
                 "format": quality,
-                "outtmpl": os.path.join(YT_ROOT, "%(title).80s [%(id)s].%(ext)s"),
+                "outtmpl": os.path.join(dl_dir, "%(title).80s [%(id)s].%(ext)s"),
                 "progress_hooks": [progress_hook],
                 "merge_output_format": "mp4" if not audio_only else None,
                 "quiet": True,
@@ -1600,31 +1638,32 @@ def api_yt_download():
 
             # 找到實際輸出檔案
             ext = "mp3" if audio_only else "mp4"
-            expected = os.path.join(YT_ROOT, f"{info.get('title', 'video')[:80]} [{info.get('id', '')}].{ext}")
 
             # 搜尋最新下載的檔案
             actual_file = None
             vid_id = info.get("id", "")
-            for f in sorted(os.listdir(YT_ROOT), key=lambda x: os.path.getmtime(os.path.join(YT_ROOT, x)), reverse=True):
-                if vid_id in f:
+            for f in sorted(os.listdir(dl_dir), key=lambda x: os.path.getmtime(os.path.join(dl_dir, x)), reverse=True):
+                if os.path.isfile(os.path.join(dl_dir, f)) and vid_id in f:
                     actual_file = f
                     break
             if not actual_file:
-                # 取最新檔案
-                files = sorted(os.listdir(YT_ROOT), key=lambda x: os.path.getmtime(os.path.join(YT_ROOT, x)), reverse=True)
+                files = [x for x in sorted(os.listdir(dl_dir), key=lambda x: os.path.getmtime(os.path.join(dl_dir, x)), reverse=True) if os.path.isfile(os.path.join(dl_dir, x))]
                 if files:
                     actual_file = files[0]
 
             if actual_file:
-                fp = os.path.join(YT_ROOT, actual_file)
+                fp = os.path.join(dl_dir, actual_file)
+                rel_path = f"downloads/{person_folder}/{actual_file}"
                 file_size = os.path.getsize(fp)
                 q.put({
                     "type": "done",
                     "filename": actual_file,
-                    "file_url": f"/yt-files/{actual_file}",
+                    "rel_path": rel_path,
+                    "file_url": f"/yt-files/{rel_path}",
                     "file_size_mb": round(file_size / 1024 / 1024, 1),
                     "title": info.get("title", ""),
                     "duration": info.get("duration"),
+                    "person": person_folder,
                 })
             else:
                 q.put({"type": "error", "message": "下載完成但找不到檔案"})
@@ -1663,28 +1702,44 @@ def api_yt_progress(task_id):
 
 @app.route("/api/yt/downloads")
 def api_yt_downloads():
-    """列出已下載的 YT 影片"""
-    os.makedirs(YT_ROOT, exist_ok=True)
+    """列出已下載的 YT 影片（遞迴掃描 downloads/ 和 extracts/）"""
     exts = {".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus"}
     files = []
-    for f in sorted(os.listdir(YT_ROOT),
-                    key=lambda x: os.path.getmtime(os.path.join(YT_ROOT, x)),
-                    reverse=True):
-        fp = os.path.join(YT_ROOT, f)
-        if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in exts:
-            size = os.path.getsize(fp)
-            files.append({
-                "filename": f,
-                "url": f"/yt-files/{f}",
-                "size_mb": round(size / 1024 / 1024, 1),
-                "ext": os.path.splitext(f)[1].lower(),
-                "created": datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%Y-%m-%d %H:%M"),
-            })
+    for category in ("downloads", "extracts"):
+        cat_dir = os.path.join(YT_ROOT, category)
+        if not os.path.isdir(cat_dir):
+            continue
+        for person in sorted(os.listdir(cat_dir)):
+            person_dir = os.path.join(cat_dir, person)
+            if not os.path.isdir(person_dir):
+                continue
+            for f in os.listdir(person_dir):
+                fp = os.path.join(person_dir, f)
+                if not os.path.isfile(fp):
+                    continue
+                if os.path.splitext(f)[1].lower() not in exts:
+                    continue
+                rel_path = f"{category}/{person}/{f}"
+                size = os.path.getsize(fp)
+                files.append({
+                    "filename": f,
+                    "rel_path": rel_path,
+                    "url": f"/yt-files/{rel_path}",
+                    "size_mb": round(size / 1024 / 1024, 1),
+                    "ext": os.path.splitext(f)[1].lower(),
+                    "created": datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%Y-%m-%d %H:%M"),
+                    "category": category,
+                    "person": person,
+                })
+    files.sort(key=lambda x: x["created"], reverse=True)
     return jsonify(files)
 
 
 @app.route("/yt-files/<path:filename>")
 def serve_yt_file(filename):
+    safe = os.path.normpath(os.path.join(YT_ROOT, filename))
+    if not safe.startswith(os.path.normpath(YT_ROOT)):
+        return "Forbidden", 403
     return send_from_directory(YT_ROOT, filename)
 
 
@@ -1928,7 +1983,10 @@ def api_yt_extract():
     if not filename or not person:
         return jsonify({"error": "需要 filename 和 person"}), 400
 
-    video_path = os.path.join(YT_ROOT, filename)
+    # filename 現在是相對路徑如 downloads/ahyeon/video.mp4
+    video_path = os.path.normpath(os.path.join(YT_ROOT, filename))
+    if not video_path.startswith(os.path.normpath(YT_ROOT)):
+        return jsonify({"error": "無效的檔案路徑"}), 400
     if not os.path.isfile(video_path):
         return jsonify({"error": f"找不到影片: {filename}"}), 404
 
@@ -1984,17 +2042,21 @@ def api_yt_extract():
                    "message": f"找到 {len(segments)} 個片段（共 {total_dur:.1f} 秒），剪輯中..."})
 
             # Phase 4: FFmpeg 剪輯
-            base = os.path.splitext(filename)[0]
+            base = os.path.splitext(os.path.basename(filename))[0]
             out_name = f"{base}_{person}.mp4"
-            out_path = os.path.join(YT_ROOT, out_name)
+            extract_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
+            os.makedirs(extract_dir, exist_ok=True)
+            out_path = os.path.join(extract_dir, out_name)
             result = _extract_segments(video_path, segments, out_path)
 
             if result and os.path.isfile(result):
+                rel_path = f"extracts/{sanitize_name(person)}/{out_name}"
                 fsize = os.path.getsize(result)
                 q.put({
                     "type": "done",
                     "filename": out_name,
-                    "file_url": f"/yt-files/{out_name}",
+                    "rel_path": rel_path,
+                    "file_url": f"/yt-files/{rel_path}",
                     "file_size_mb": round(fsize / 1024 / 1024, 1),
                     "segments": len(segments),
                     "duration": round(total_dur, 1),
@@ -3080,11 +3142,12 @@ function renderYtResults(results){
     const v = _ytResults[idx];
     if(!v) return;
     const quality = document.getElementById('yt-quality').value;
-    ytDownload(v.url, v.title, quality);
+    const keyword = document.getElementById('yt-query').value.trim();
+    ytDownload(v.url, v.title, quality, keyword);
   };
 }
 
-async function ytDownload(url, title, quality){
+async function ytDownload(url, title, quality, keyword){
   const progCard = document.getElementById('yt-progress-card');
   progCard.style.display = '';
   document.getElementById('yt-dl-title').textContent = title;
@@ -3097,7 +3160,7 @@ async function ytDownload(url, title, quality){
   try{
     const r = await fetch('/api/yt/download',{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({url, title, quality})
+      body:JSON.stringify({url, title, quality, keyword})
     });
     const d = await r.json();
     if(d.error){
@@ -3153,15 +3216,20 @@ async function ytLoadDownloads(){
     el.innerHTML = '';
     files.forEach(f=>{
       const isAudio = ['.mp3','.m4a','.opus'].includes(f.ext);
-      const icon = isAudio ? '🎵' : '🎬';
+      const catIcon = f.category==='extracts' ? '🎯' : (isAudio ? '🎵' : '🎬');
+      const personTag = f.person && f.person !== '_unsorted'
+        ? '<span style="font-size:.7em;background:var(--bg2);padding:2px 6px;border-radius:3px;margin-right:4px">📁 '+f.person+'</span>'
+        : '';
       const div = document.createElement('div');
       div.className = 'yt-dl-item';
-      div.innerHTML = '<span>'+icon+'</span>'
+      const relPath = (f.rel_path||f.filename).replace(/'/g,"\\'");
+      div.innerHTML = '<span>'+catIcon+'</span>'
+        +personTag
         +'<span class="fname" title="'+f.filename+'">'+f.filename+'</span>'
         +'<span style="color:var(--txt2);white-space:nowrap">'+f.size_mb+'MB · '+f.created+'</span>'
         +'<a href="'+f.url+'" target="_blank">▶ 播放</a>'
         +'<a href="'+f.url+'" download>⬇</a>'
-        +(isAudio ? '' : '<button class="btn" style="font-size:.75em;padding:3px 10px" onclick="showExtract(\''+f.filename.replace(/'/g,"\\'")+'\')">🎯 擷取人物</button>');
+        +(isAudio || f.category==='extracts' ? '' : '<button class="btn" style="font-size:.75em;padding:3px 10px" onclick="showExtract(\''+relPath+'\')">🎯 擷取人物</button>');
       el.appendChild(div);
     });
   }catch(e){el.innerHTML='<span style="color:var(--err)">載入失敗</span>';}
@@ -3281,7 +3349,8 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"  本機存取: http://localhost:{PORT}")
     print(f"  區網存取: http://{local_ip}:{PORT}")
-    print(f"  下載路徑: {DOWNLOAD_ROOT}")
+    print(f"  照片路徑: {DOWNLOAD_ROOT}")
+    print(f"  影片路徑: {YT_ROOT}")
     print(f"  感知雜湊: {'已啟用' if HAS_IMAGEHASH else '未安裝 (pip install imagehash)'}")
     print("=" * 50)
     print("  按 Ctrl+C 停止伺服器")
