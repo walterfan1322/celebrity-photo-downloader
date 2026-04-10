@@ -4,7 +4,7 @@ Bulk download celebrity photos from Bing Image Search with intelligent deduplica
 
 ## Features
 
-- **Bing Image Search scraping** - Parses full-resolution image URLs from Bing search results
+- **Multiple image sources** - Bing, Google, DuckDuckGo, Pinterest (experimental) - select one or more at once
 - **3-tier deduplication** - Prevents downloading the same photo twice:
   1. **URL check** - Skips already-downloaded URLs (instant, database lookup)
   2. **MD5 hash** - Catches exact binary duplicates across different URLs
@@ -112,7 +112,7 @@ celebrity-photo-downloader/
 - **Frontend**: Vanilla HTML/CSS/JS (embedded in web_app.py)
 - **Image Processing**: Pillow, imagehash
 - **Database**: SQLite
-- **Scraping**: requests + regex parsing of Bing HTML
+- **Scraping**: requests + regex parsing (Bing, Google, DuckDuckGo, Pinterest)
 - **Remote Access**: paramiko (SSH tunneling)
 
 ## License
