@@ -37,6 +37,26 @@ try:
 except ImportError:
     HAS_YTDLP = False
 
+# ── 偵測 FFmpeg（yt-dlp 需要） ──
+FFMPEG_LOCATION = None
+if shutil.which("ffmpeg"):
+    pass  # already in PATH, yt-dlp will find it
+else:
+    try:
+        import imageio_ffmpeg
+        _ffpath = imageio_ffmpeg.get_ffmpeg_exe()
+        if os.path.isfile(_ffpath):
+            # imageio_ffmpeg 的執行檔名不是 ffmpeg.exe，
+            # 需複製一份讓 yt-dlp 能找到
+            _ffdir = os.path.join(os.path.dirname(_ffpath), "_ytdlp")
+            _ffcopy = os.path.join(_ffdir, "ffmpeg.exe")
+            if not os.path.isfile(_ffcopy):
+                os.makedirs(_ffdir, exist_ok=True)
+                shutil.copy2(_ffpath, _ffcopy)
+            FFMPEG_LOCATION = _ffdir
+    except (ImportError, OSError):
+        pass
+
 # ── 設定（可透過環境變數覆寫） ─────────────────────────────
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_ROOT = os.environ.get("DOWNLOAD_ROOT", os.path.join(APP_DIR, "Photos"))
@@ -1564,6 +1584,8 @@ def api_yt_download():
                 "no_warnings": True,
                 "noplaylist": True,
             }
+            if FFMPEG_LOCATION:
+                ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
             if audio_only:
                 ydl_opts["postprocessors"] = [{
                     "key": "FFmpegExtractAudio",
@@ -1667,6 +1689,353 @@ def serve_yt_file(filename):
 
 
 # ══════════════════════════════════════════════════════════
+#  人臉辨識影片擷取
+# ══════════════════════════════════════════════════════════
+MODELS_DIR = os.path.join(APP_DIR, "models")
+YUNET_MODEL = os.path.join(MODELS_DIR, "yunet.onnx")
+SFACE_MODEL = os.path.join(MODELS_DIR, "sface.onnx")
+HAS_FACE_MODELS = os.path.isfile(YUNET_MODEL) and os.path.isfile(SFACE_MODEL)
+
+try:
+    import cv2
+    import numpy as np
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
+EXTRACT_CONFIG = {
+    "sample_interval": 1.0,       # 每幾秒取一幀
+    "similarity_threshold": 0.35, # SFace cosine similarity 門檻 (SFace 建議 0.363)
+    "merge_gap": 3.0,             # 時間段合併間隔（秒）
+    "padding": 0.5,               # 每段前後緩衝（秒）
+    "max_ref_photos": 80,         # 最多用幾張參考照
+}
+
+extract_tasks = {}
+extract_tasks_lock = threading.Lock()
+
+
+def _build_face_models(width=320, height=320):
+    """建立人臉偵測器和辨識器"""
+    detector = cv2.FaceDetectorYN.create(YUNET_MODEL, "", (width, height), 0.7, 0.3, 5000)
+    recognizer = cv2.FaceRecognizerSF.create(SFACE_MODEL, "")
+    return detector, recognizer
+
+
+def _build_reference_embeddings(person_name, progress_cb=None):
+    """從已下載照片建立人臉特徵向量"""
+    photo_dir = os.path.join(DOWNLOAD_ROOT, person_name)
+    if not os.path.isdir(photo_dir):
+        return None
+
+    # 檢查快取
+    cache_path = os.path.join(photo_dir, f".face_embeddings.npy")
+    if os.path.isfile(cache_path):
+        return np.load(cache_path)
+
+    import glob as _glob
+    import random as _random
+    exts = ["*.jpg", "*.jpeg", "*.png", "*.webp"]
+    files = []
+    for ext in exts:
+        files.extend(_glob.glob(os.path.join(photo_dir, ext)))
+    if not files:
+        return None
+
+    max_photos = EXTRACT_CONFIG["max_ref_photos"]
+    if len(files) > max_photos:
+        _random.shuffle(files)
+        files = files[:max_photos]
+
+    detector, recognizer = _build_face_models()
+    embeddings = []
+
+    for i, fpath in enumerate(files):
+        try:
+            img = cv2.imread(fpath)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(img)
+            if faces is None or len(faces) == 0:
+                continue
+            # 取最大的臉（假設主角最大）
+            areas = [f[2] * f[3] for f in faces]
+            best = faces[int(np.argmax(areas))]
+            aligned = recognizer.alignCrop(img, best)
+            emb = recognizer.feature(aligned)
+            embeddings.append(emb.flatten())
+        except Exception:
+            continue
+        if progress_cb and i % 10 == 0:
+            progress_cb(i / len(files))
+
+    if len(embeddings) < 3:
+        return None
+
+    mat = np.stack(embeddings)
+    # 正規化
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    mat = mat / norms
+    np.save(cache_path, mat)
+    return mat
+
+
+def _scan_video_for_person(video_path, ref_embeddings, progress_cb=None):
+    """掃描影片，回傳出現該人的時間戳列表"""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = total_frames / fps if fps > 0 else 0
+
+    interval = EXTRACT_CONFIG["sample_interval"]
+    threshold = EXTRACT_CONFIG["similarity_threshold"]
+
+    detector, recognizer = _build_face_models()
+    timestamps = []
+
+    t = 0.0
+    while t < duration:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ret, frame = cap.read()
+        if not ret:
+            t += interval
+            continue
+
+        h, w = frame.shape[:2]
+        detector.setInputSize((w, h))
+        _, faces = detector.detect(frame)
+
+        if faces is not None:
+            for face in faces:
+                try:
+                    aligned = recognizer.alignCrop(frame, face)
+                    emb = recognizer.feature(aligned).flatten()
+                    emb_norm = np.linalg.norm(emb)
+                    if emb_norm > 0:
+                        emb = emb / emb_norm
+                    # cosine similarity vs all references
+                    sims = ref_embeddings @ emb
+                    if np.max(sims) >= threshold:
+                        timestamps.append(t)
+                        break
+                except Exception:
+                    continue
+
+        t += interval
+        if progress_cb:
+            progress_cb(t / duration if duration > 0 else 1)
+
+    cap.release()
+    return timestamps
+
+
+def _merge_segments(timestamps):
+    """將時間戳合併成連續片段"""
+    if not timestamps:
+        return []
+    interval = EXTRACT_CONFIG["sample_interval"]
+    gap = EXTRACT_CONFIG["merge_gap"]
+    pad = EXTRACT_CONFIG["padding"]
+
+    timestamps.sort()
+    segments = []
+    start = timestamps[0]
+    end = timestamps[0]
+
+    for t in timestamps[1:]:
+        if t - end <= gap + interval:
+            end = t
+        else:
+            segments.append((max(0, start - pad), end + interval + pad))
+            start = t
+            end = t
+    segments.append((max(0, start - pad), end + interval + pad))
+    return segments
+
+
+def _extract_segments(video_path, segments, output_path):
+    """用 FFmpeg 剪輯並合併片段"""
+    if FFMPEG_LOCATION:
+        ffmpeg_exe = os.path.join(FFMPEG_LOCATION, "ffmpeg.exe")
+    else:
+        ffmpeg_exe = shutil.which("ffmpeg") or "ffmpeg"
+        # 也嘗試 imageio_ffmpeg
+        if not os.path.isfile(ffmpeg_exe):
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except ImportError:
+                pass
+
+    import tempfile, subprocess
+    temp_dir = tempfile.mkdtemp()
+    try:
+        seg_files = []
+        for i, (start, end) in enumerate(segments):
+            seg_path = os.path.join(temp_dir, f"seg_{i:04d}.mp4")
+            cmd = [
+                ffmpeg_exe, "-y",
+                "-ss", f"{start:.2f}",
+                "-i", video_path,
+                "-t", f"{end - start:.2f}",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                seg_path
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=120)
+            if os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0:
+                seg_files.append(seg_path)
+
+        if not seg_files:
+            return None
+
+        if len(seg_files) == 1:
+            shutil.copy2(seg_files[0], output_path)
+        else:
+            list_path = os.path.join(temp_dir, "list.txt")
+            with open(list_path, "w") as f:
+                for sp in seg_files:
+                    f.write(f"file '{sp.replace(os.sep, '/')}'\n")
+            cmd = [
+                ffmpeg_exe, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", list_path,
+                "-c", "copy",
+                output_path
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=120)
+
+        return output_path if os.path.isfile(output_path) else None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.route("/api/yt/extract", methods=["POST"])
+def api_yt_extract():
+    """啟動人臉辨識影片擷取"""
+    if not HAS_FACE_MODELS or not HAS_CV2:
+        return jsonify({"error": "人臉模型或 OpenCV 未安裝"}), 500
+
+    data = request.json
+    filename = (data.get("filename") or "").strip()
+    person = (data.get("person") or "").strip()
+    if not filename or not person:
+        return jsonify({"error": "需要 filename 和 person"}), 400
+
+    video_path = os.path.join(YT_ROOT, filename)
+    if not os.path.isfile(video_path):
+        return jsonify({"error": f"找不到影片: {filename}"}), 404
+
+    person = resolve_celebrity(person)
+    photo_dir = os.path.join(DOWNLOAD_ROOT, person)
+    if not os.path.isdir(photo_dir):
+        return jsonify({"error": f"找不到 {person} 的照片資料夾，請先下載照片"}), 400
+
+    task_id = str(uuid.uuid4())[:8]
+    q = Queue()
+    with extract_tasks_lock:
+        extract_tasks[task_id] = {"queue": q}
+
+    def worker():
+        try:
+            # Phase 1: 建立參考特徵
+            q.put({"type": "progress", "phase": "embeddings", "percent": 0,
+                   "message": f"建立 {person} 的臉部特徵..."})
+
+            def emb_cb(pct):
+                q.put({"type": "progress", "phase": "embeddings",
+                       "percent": int(pct * 15),
+                       "message": f"建立臉部特徵 {int(pct*100)}%"})
+
+            ref = _build_reference_embeddings(person, emb_cb)
+            if ref is None or len(ref) < 3:
+                q.put({"type": "error", "message": f"{person} 的照片中找不到足夠的臉部特徵（至少需要 3 張）"})
+                return
+
+            q.put({"type": "progress", "phase": "embeddings", "percent": 15,
+                   "message": f"完成！使用 {len(ref)} 張臉部特徵"})
+
+            # Phase 2: 掃描影片
+            q.put({"type": "progress", "phase": "scanning", "percent": 15,
+                   "message": "掃描影片中的人臉..."})
+
+            def scan_cb(pct):
+                p = 15 + int(pct * 65)
+                q.put({"type": "progress", "phase": "scanning",
+                       "percent": min(p, 80),
+                       "message": f"掃描影片 {int(pct*100)}%"})
+
+            timestamps = _scan_video_for_person(video_path, ref, scan_cb)
+
+            if not timestamps:
+                q.put({"type": "error", "message": f"影片中未偵測到 {person}"})
+                return
+
+            # Phase 3: 合併片段
+            segments = _merge_segments(timestamps)
+            total_dur = sum(e - s for s, e in segments)
+            q.put({"type": "progress", "phase": "cutting", "percent": 82,
+                   "message": f"找到 {len(segments)} 個片段（共 {total_dur:.1f} 秒），剪輯中..."})
+
+            # Phase 4: FFmpeg 剪輯
+            base = os.path.splitext(filename)[0]
+            out_name = f"{base}_{person}.mp4"
+            out_path = os.path.join(YT_ROOT, out_name)
+            result = _extract_segments(video_path, segments, out_path)
+
+            if result and os.path.isfile(result):
+                fsize = os.path.getsize(result)
+                q.put({
+                    "type": "done",
+                    "filename": out_name,
+                    "file_url": f"/yt-files/{out_name}",
+                    "file_size_mb": round(fsize / 1024 / 1024, 1),
+                    "segments": len(segments),
+                    "duration": round(total_dur, 1),
+                })
+            else:
+                q.put({"type": "error", "message": "FFmpeg 剪輯失敗"})
+
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return jsonify({"task_id": task_id})
+
+
+@app.route("/api/yt/extract-progress/<task_id>")
+def api_yt_extract_progress(task_id):
+    """SSE 進度"""
+    def generate():
+        with extract_tasks_lock:
+            task = extract_tasks.get(task_id)
+        if not task:
+            yield f"data: {json.dumps({'type': 'error', 'message': '任務不存在'})}\n\n"
+            return
+        q = task["queue"]
+        while True:
+            try:
+                evt = q.get(timeout=30)
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                if evt.get("type") in ("done", "error"):
+                    break
+            except Empty:
+                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        with extract_tasks_lock:
+            extract_tasks.pop(task_id, None)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ══════════════════════════════════════════════════════════
 #  HTML 前端
 # ══════════════════════════════════════════════════════════
 HTML_PAGE = r"""<!DOCTYPE html>
@@ -1702,7 +2071,7 @@ header small{display:block;font-size:.45em;color:var(--txt2);font-weight:400;mar
 .yt-item-meta{font-size:.8em;color:var(--txt2)}
 .yt-item-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
 .yt-dl-list{display:grid;gap:8px;margin-top:12px}
-.yt-dl-item{display:flex;align-items:center;gap:10px;padding:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:.88em}
+.yt-dl-item{display:flex;align-items:center;gap:10px;padding:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:.88em;flex-wrap:wrap}
 .yt-dl-item .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .yt-dl-item a{color:var(--pri);text-decoration:none;font-weight:500}
 .card{background:var(--card);border-radius:12px;padding:20px 24px;margin-bottom:14px;
@@ -1999,11 +2368,6 @@ justify-content:center;align-items:center;cursor:zoom-out}
 <div id="yt-search-status" style="font-size:.82em;color:var(--txt2);margin-top:4px"></div>
 </div>
 
-<div id="yt-results-card" class="card" style="display:none">
-<h3>搜尋結果</h3>
-<div id="yt-results" class="yt-results"></div>
-</div>
-
 <div id="yt-progress-card" class="card" style="display:none">
 <h3>⬇️ 下載中</h3>
 <div id="yt-dl-title" style="font-weight:600;margin-bottom:8px"></div>
@@ -2012,6 +2376,26 @@ justify-content:center;align-items:center;cursor:zoom-out}
   <span class="progress-text" id="yt-prog-text">0%</span>
 </div>
 <div id="yt-prog-msg" style="font-size:.82em;color:var(--txt2);margin-top:6px"></div>
+</div>
+
+<div id="yt-results-card" class="card" style="display:none">
+<h3>搜尋結果</h3>
+<div id="yt-results" class="yt-results"></div>
+</div>
+
+<div id="yt-extract-card" class="card" style="display:none">
+<h3>🎯 人物擷取</h3>
+<div id="yt-extract-title" style="font-weight:600;margin-bottom:8px"></div>
+<div class="row">
+  <label>擷取人物</label>
+  <select id="extract-person" style="min-width:160px"></select>
+  <button class="btn btn-pri" onclick="ytExtract()" id="btn-extract" style="font-size:.85em">🔍 開始擷取</button>
+</div>
+<div class="progress-wrap" id="extract-prog-wrap" style="display:none;margin-top:8px">
+  <div class="progress-bar" id="extract-prog-bar" style="width:0%"></div>
+  <span class="progress-text" id="extract-prog-text">0%</span>
+</div>
+<div id="extract-msg" style="font-size:.82em;color:var(--txt2);margin-top:6px"></div>
 </div>
 
 <div class="card">
@@ -2661,36 +3045,46 @@ async function ytSearch(){
   }
 }
 
+// Store search results for download reference
+let _ytResults = [];
+
 function renderYtResults(results){
+  _ytResults = results;
   const container = document.getElementById('yt-results');
   const card = document.getElementById('yt-results-card');
   container.innerHTML = '';
   if(!results.length){card.style.display='none'; return;}
   card.style.display = '';
-  const quality = document.getElementById('yt-quality').value;
 
-  results.forEach(v=>{
+  results.forEach((v, idx)=>{
     const div = document.createElement('div');
     div.className = 'yt-item';
     const durStr = _fmtDuration(v.duration);
     const viewStr = _fmtViews(v.view_count);
+    const safeTitle = (v.title||'').replace(/</g,'&lt;');
     div.innerHTML = '<img src="'+(v.thumbnail||'')+'" alt="" onerror="this.style.display=\'none\'">'
       +'<div class="yt-item-info">'
-      +'<div class="yt-item-title">'+((v.title||'').replace(/</g,'&lt;'))+'</div>'
+      +'<div class="yt-item-title">'+safeTitle+'</div>'
       +'<div class="yt-item-meta">'+(v.channel||'')+' · '+(durStr?durStr+' · ':'')+viewStr+' 次觀看</div>'
       +'<div class="yt-item-actions">'
-      +'<button class="btn btn-pri" style="font-size:.8em;padding:4px 12px" onclick=\'ytDownload("'+encodeURIComponent(v.url||'')+'","'
-        +encodeURIComponent(v.title||'')+'","'+encodeURIComponent(quality)+'")\'>⬇ 下載</button>'
+      +'<button class="btn btn-pri" style="font-size:.8em;padding:4px 12px" data-yt-idx="'+idx+'">⬇ 下載</button>'
       +'<a href="'+(v.url||'')+'" target="_blank" style="font-size:.8em;color:var(--pri);text-decoration:none;padding:4px 8px">▶ 開啟</a>'
       +'</div></div>';
     container.appendChild(div);
   });
+  // Event delegation for download buttons
+  container.onclick = (e)=>{
+    const btn = e.target.closest('[data-yt-idx]');
+    if(!btn) return;
+    const idx = parseInt(btn.dataset.ytIdx);
+    const v = _ytResults[idx];
+    if(!v) return;
+    const quality = document.getElementById('yt-quality').value;
+    ytDownload(v.url, v.title, quality);
+  };
 }
 
-async function ytDownload(urlEnc, titleEnc, qualityEnc){
-  const url = decodeURIComponent(urlEnc);
-  const title = decodeURIComponent(titleEnc);
-  const quality = decodeURIComponent(qualityEnc);
+async function ytDownload(url, title, quality){
   const progCard = document.getElementById('yt-progress-card');
   progCard.style.display = '';
   document.getElementById('yt-dl-title').textContent = title;
@@ -2698,6 +3092,7 @@ async function ytDownload(urlEnc, titleEnc, qualityEnc){
   document.getElementById('yt-prog-text').textContent = '0%';
   document.getElementById('yt-prog-msg').textContent = '準備中...';
   document.getElementById('yt-prog-msg').style.color = 'var(--txt2)';
+  progCard.scrollIntoView({behavior:'smooth', block:'center'});
 
   try{
     const r = await fetch('/api/yt/download',{
@@ -2765,10 +3160,108 @@ async function ytLoadDownloads(){
         +'<span class="fname" title="'+f.filename+'">'+f.filename+'</span>'
         +'<span style="color:var(--txt2);white-space:nowrap">'+f.size_mb+'MB · '+f.created+'</span>'
         +'<a href="'+f.url+'" target="_blank">▶ 播放</a>'
-        +'<a href="'+f.url+'" download>⬇</a>';
+        +'<a href="'+f.url+'" download>⬇</a>'
+        +(isAudio ? '' : '<button class="btn" style="font-size:.75em;padding:3px 10px" onclick="showExtract(\''+f.filename.replace(/'/g,"\\'")+'\')">🎯 擷取人物</button>');
       el.appendChild(div);
     });
   }catch(e){el.innerHTML='<span style="color:var(--err)">載入失敗</span>';}
+}
+
+// ═══════════ 人臉辨識影片擷取 ═══════════════════════════
+let extractES = null;
+
+async function loadCelebrities(){
+  try{
+    const r = await fetch('/api/celebrities');
+    const list = await r.json();
+    const sel = document.getElementById('extract-person');
+    sel.innerHTML = list.map(c=>{
+      const name = typeof c === 'string' ? c : c.name;
+      const count = c.count ? ' ('+c.count+'張)' : '';
+      return '<option value="'+name+'">'+name+count+'</option>';
+    }).join('');
+  }catch(e){}
+}
+
+function showExtract(filename){
+  const card = document.getElementById('yt-extract-card');
+  card.style.display = '';
+  document.getElementById('yt-extract-title').textContent = filename;
+  card.dataset.filename = filename;
+  document.getElementById('extract-prog-wrap').style.display = 'none';
+  document.getElementById('extract-msg').textContent = '';
+  document.getElementById('extract-msg').style.color = 'var(--txt2)';
+  loadCelebrities();
+  card.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+async function ytExtract(){
+  const card = document.getElementById('yt-extract-card');
+  const filename = card.dataset.filename;
+  const person = document.getElementById('extract-person').value;
+  if(!filename || !person) return alert('請選擇影片和人物');
+
+  document.getElementById('btn-extract').disabled = true;
+  document.getElementById('extract-prog-wrap').style.display = '';
+  document.getElementById('extract-prog-bar').style.width = '0%';
+  document.getElementById('extract-prog-text').textContent = '0%';
+  document.getElementById('extract-msg').textContent = '啟動中...';
+  document.getElementById('extract-msg').style.color = 'var(--txt2)';
+
+  try{
+    const r = await fetch('/api/yt/extract',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename, person})
+    });
+    const d = await r.json();
+    if(d.error){
+      document.getElementById('extract-msg').textContent = '錯誤: '+d.error;
+      document.getElementById('extract-msg').style.color = 'var(--err)';
+      document.getElementById('btn-extract').disabled = false;
+      return;
+    }
+    extractListenSSE(d.task_id);
+  }catch(e){
+    document.getElementById('extract-msg').textContent = '連線失敗: '+e;
+    document.getElementById('extract-msg').style.color = 'var(--err)';
+    document.getElementById('btn-extract').disabled = false;
+  }
+}
+
+function extractListenSSE(taskId){
+  if(extractES) extractES.close();
+  extractES = new EventSource('/api/yt/extract-progress/'+taskId);
+  extractES.onmessage = (e)=>{
+    const d = JSON.parse(e.data);
+    switch(d.type){
+      case 'progress':
+        const pct = Math.round(d.percent||0);
+        document.getElementById('extract-prog-bar').style.width = pct+'%';
+        document.getElementById('extract-prog-text').textContent = pct+'%';
+        document.getElementById('extract-msg').textContent = d.message||'';
+        break;
+      case 'done':
+        extractES.close(); extractES=null;
+        document.getElementById('extract-prog-bar').style.width = '100%';
+        document.getElementById('extract-prog-text').textContent = '100%';
+        document.getElementById('extract-msg').innerHTML =
+          '✅ 完成！找到 '+d.segments+' 個片段（'+d.duration+'秒）'
+          +' <a href="'+d.file_url+'" target="_blank" style="color:var(--pri)">'+d.filename+'</a>'
+          +' ('+d.file_size_mb+'MB)';
+        document.getElementById('btn-extract').disabled = false;
+        ytLoadDownloads();
+        break;
+      case 'error':
+        extractES.close(); extractES=null;
+        document.getElementById('extract-msg').textContent = '❌ '+d.message;
+        document.getElementById('extract-msg').style.color = 'var(--err)';
+        document.getElementById('btn-extract').disabled = false;
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  extractES.onerror = ()=>{ extractES.close(); extractES=null;
+    document.getElementById('btn-extract').disabled = false; };
 }
 </script>
 </body>
