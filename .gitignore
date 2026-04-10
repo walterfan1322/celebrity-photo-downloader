@@ -1,9 +1,29 @@
+# Environment & secrets
 .env
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+
+# Data & logs
 *.db
 *.sqlite3
+*.log
+*.bak
+data/
+
+# Media folders (user content)
+Photos/
+Videos/
+YouTube/
 /photos/
 /CelebrityPhotos/
+
+# Deployment (may contain credentials)
 deploy.bat
+
+# Installers
+setup/ts-setup.msi
+*.msi
