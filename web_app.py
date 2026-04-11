@@ -1921,18 +1921,7 @@ def _merge_segments(timestamps):
 
 def _extract_segments(video_path, segments, output_path):
     """用 FFmpeg 剪輯並合併片段"""
-    if FFMPEG_LOCATION:
-        ffmpeg_exe = os.path.join(FFMPEG_LOCATION, "ffmpeg.exe")
-    else:
-        ffmpeg_exe = shutil.which("ffmpeg") or "ffmpeg"
-        # 也嘗試 imageio_ffmpeg
-        if not os.path.isfile(ffmpeg_exe):
-            try:
-                import imageio_ffmpeg
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            except ImportError:
-                pass
-
+    ffmpeg_exe = _get_ffmpeg()
     import tempfile, subprocess
     temp_dir = tempfile.mkdtemp()
     try:
@@ -2100,6 +2089,411 @@ def api_yt_extract_progress(task_id):
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ══════════════════════════════════════════════════════════
+#  精華影片生成
+# ══════════════════════════════════════════════════════════
+HIGHLIGHT_STRATEGIES = {
+    "closeup":  {"face_weight": 1.0, "motion_weight": 0.0, "label": "特寫優先"},
+    "dynamic":  {"face_weight": 0.0, "motion_weight": 1.0, "label": "動態優先"},
+    "balanced": {"face_weight": 0.6, "motion_weight": 0.4, "label": "均衡"},
+    "random":   {"face_weight": 0.0, "motion_weight": 0.0, "label": "隨機"},
+}
+
+highlight_tasks = {}
+highlight_tasks_lock = threading.Lock()
+
+
+def _get_ffmpeg():
+    """取得 FFmpeg 執行檔路徑"""
+    if FFMPEG_LOCATION:
+        return os.path.join(FFMPEG_LOCATION, "ffmpeg.exe")
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        return "ffmpeg"
+
+
+def _score_video_highlights(video_path, strategy, progress_cb=None):
+    """對影片每秒評分，找出精彩時刻"""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = total_frames / fps if fps > 0 else 0
+    if duration < 2:
+        cap.release()
+        return []
+
+    weights = HIGHLIGHT_STRATEGIES.get(strategy, HIGHLIGHT_STRATEGIES["balanced"])
+    face_w = weights["face_weight"]
+    motion_w = weights["motion_weight"]
+    is_random = (strategy == "random")
+
+    detector = None
+    if face_w > 0 and HAS_CV2:
+        detector, _ = _build_face_models()
+
+    scores = []
+    prev_gray = None
+    t = 0.0
+
+    while t < duration:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ret, frame = cap.read()
+        if not ret:
+            t += 1.0
+            continue
+
+        h, w = frame.shape[:2]
+        frame_area = h * w
+
+        # 臉部評分：臉部面積佔畫面比例
+        face_score = 0.0
+        if detector and face_w > 0:
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(frame)
+            if faces is not None and len(faces) > 0:
+                areas = [f[2] * f[3] for f in faces]
+                face_score = min(max(areas) / frame_area * 10, 1.0)
+
+        # 動態評分：幀間差異
+        motion_score = 0.0
+        if motion_w > 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prev_gray is not None:
+                diff = cv2.absdiff(gray, prev_gray)
+                motion_score = min(diff.mean() / 30.0, 1.0)
+            prev_gray = gray
+
+        if is_random:
+            import random as _rng
+            combined = _rng.random()
+        else:
+            combined = face_w * face_score + motion_w * motion_score
+
+        scores.append({"time": t, "score": combined})
+        t += 1.0
+        if progress_cb:
+            progress_cb(t / duration)
+
+    cap.release()
+    return scores
+
+
+def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_video):
+    """從所有影片中挑選最佳片段"""
+    candidates = []
+    for video_path, scores in all_scores:
+        for s in scores:
+            candidates.append({
+                "video": video_path,
+                "time": s["time"],
+                "score": s["score"],
+            })
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    selected = []
+    video_counts = {}
+    total = 0.0
+
+    for c in candidates:
+        if total >= total_duration:
+            break
+
+        v = c["video"]
+        if max_per_video > 0 and video_counts.get(v, 0) >= max_per_video:
+            continue
+
+        # 避免同一部影片的片段重疊
+        overlap = False
+        for s in selected:
+            if s["video"] == v and abs(s["time"] - c["time"]) < clip_duration + 1:
+                overlap = True
+                break
+        if overlap:
+            continue
+
+        selected.append(c)
+        video_counts[v] = video_counts.get(v, 0) + 1
+        total += clip_duration
+
+    # 按影片和時間排序，讓播放更流暢
+    selected.sort(key=lambda x: (x["video"], x["time"]))
+    return selected
+
+
+def _compile_highlight(clips, clip_duration, output_path, transition,
+                       transition_dur, resolution, progress_cb=None):
+    """用 FFmpeg 把片段合成精華影片"""
+    ffmpeg = _get_ffmpeg()
+    import tempfile, subprocess
+
+    res_map = {"720p": (1280, 720), "1080p": (1920, 1080)}
+    tw, th = res_map.get(resolution, (1280, 720))
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Phase 1: 擷取每個片段並統一解析度
+        seg_files = []
+        for i, clip in enumerate(clips):
+            seg_path = os.path.join(temp_dir, f"clip_{i:04d}.mp4")
+            start = max(0, clip["time"] - 0.5)
+            cmd = [
+                ffmpeg, "-y",
+                "-ss", f"{start:.2f}",
+                "-i", clip["video"],
+                "-t", f"{clip_duration + 0.5:.2f}",
+                "-vf", f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+                       f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                "-r", "30",
+                "-shortest",
+                seg_path,
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=120)
+            if os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0:
+                seg_files.append(seg_path)
+            if progress_cb:
+                progress_cb(i / len(clips))
+
+        if not seg_files:
+            return None
+
+        # Phase 2: 合成
+        if transition == "crossfade" and len(seg_files) > 1 and transition_dur > 0:
+            # xfade 鏈式過場
+            result = _xfade_concat(ffmpeg, seg_files, clip_duration,
+                                   transition_dur, output_path, temp_dir)
+        else:
+            # 直接 concat
+            list_path = os.path.join(temp_dir, "list.txt")
+            with open(list_path, "w") as f:
+                for sp in seg_files:
+                    f.write(f"file '{sp.replace(os.sep, '/')}'\n")
+            cmd = [
+                ffmpeg, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", list_path,
+                "-c", "copy",
+                output_path,
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=120)
+            result = output_path
+
+        return result if os.path.isfile(output_path) else None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _xfade_concat(ffmpeg, seg_files, clip_dur, xfade_dur, output_path, temp_dir):
+    """用 xfade filter 鏈式合成片段"""
+    import subprocess
+    n = len(seg_files)
+    if n == 1:
+        shutil.copy2(seg_files[0], output_path)
+        return output_path
+
+    inputs = []
+    for f in seg_files:
+        inputs.extend(["-i", f])
+
+    # 建構 xfade filter chain
+    filters = []
+    offset = clip_dur - xfade_dur
+    prev = "[0]"
+    for i in range(1, n):
+        curr = f"[{i}]"
+        out = f"[v{i}]" if i < n - 1 else "[vout]"
+        filters.append(
+            f"{prev}{curr}xfade=transition=fade:duration={xfade_dur:.2f}"
+            f":offset={offset:.2f}{out}"
+        )
+        offset += clip_dur - xfade_dur
+        prev = out
+
+    # 音訊 concat
+    audio_inputs = "".join(f"[{i}:a]" for i in range(n))
+    audio_filter = f"{audio_inputs}concat=n={n}:v=0:a=1[aout]"
+
+    filter_complex = ";".join(filters) + ";" + audio_filter
+
+    cmd = [
+        ffmpeg, "-y",
+    ] + inputs + [
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path,
+    ]
+    subprocess.run(cmd, capture_output=True, timeout=300)
+    return output_path
+
+
+@app.route("/api/yt/highlight", methods=["POST"])
+def api_yt_highlight():
+    """啟動精華影片生成"""
+    if not HAS_CV2:
+        return jsonify({"error": "OpenCV 未安裝"}), 500
+
+    data = request.json
+    person = (data.get("person") or "").strip()
+    if not person:
+        return jsonify({"error": "請選擇人物"}), 400
+
+    person = resolve_celebrity(person)
+    person_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
+    if not os.path.isdir(person_dir):
+        return jsonify({"error": f"找不到 {person} 的擷取影片"}), 400
+
+    # 收集該人的所有影片
+    exts = {".mp4", ".mkv", ".webm"}
+    videos = [os.path.join(person_dir, f) for f in os.listdir(person_dir)
+              if os.path.splitext(f)[1].lower() in exts
+              and not f.startswith("highlight_")]
+    if not videos:
+        return jsonify({"error": "沒有可用的擷取影片"}), 400
+
+    # 讀取選項
+    strategy = data.get("strategy", "balanced")
+    clip_duration = float(data.get("clip_duration", 3))
+    total_duration = float(data.get("total_duration", 30))
+    max_per_video = int(data.get("max_per_video", 5))
+    transition = data.get("transition", "crossfade")
+    transition_dur = float(data.get("transition_dur", 0.5))
+    resolution = data.get("resolution", "720p")
+
+    task_id = str(uuid.uuid4())[:8]
+    q = Queue()
+    with highlight_tasks_lock:
+        highlight_tasks[task_id] = {"queue": q}
+
+    def worker():
+        try:
+            # Phase 1: 掃描所有影片評分
+            all_scores = []
+            for vi, vpath in enumerate(videos):
+                vname = os.path.basename(vpath)
+                q.put({"type": "progress", "percent": int(vi / len(videos) * 60),
+                       "message": f"分析影片 {vi+1}/{len(videos)}: {vname[:40]}..."})
+
+                def scan_cb(pct):
+                    p = int((vi + pct) / len(videos) * 60)
+                    q.put({"type": "progress", "percent": min(p, 59),
+                           "message": f"分析 {vname[:30]}... {int(pct*100)}%"})
+
+                scores = _score_video_highlights(vpath, strategy, scan_cb)
+                if scores:
+                    all_scores.append((vpath, scores))
+
+            if not all_scores:
+                q.put({"type": "error", "message": "所有影片都無法分析"})
+                return
+
+            # Phase 2: 挑選片段
+            q.put({"type": "progress", "percent": 62, "message": "挑選精彩片段..."})
+            clips = _select_highlight_clips(all_scores, clip_duration,
+                                            total_duration, max_per_video)
+            if not clips:
+                q.put({"type": "error", "message": "找不到符合條件的片段"})
+                return
+
+            actual_dur = len(clips) * clip_duration
+            q.put({"type": "progress", "percent": 65,
+                   "message": f"選出 {len(clips)} 個片段（預計 {actual_dur:.0f} 秒），合成中..."})
+
+            # Phase 3: FFmpeg 合成
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_name = f"highlight_{sanitize_name(person)}_{ts}.mp4"
+            out_path = os.path.join(person_dir, out_name)
+
+            def compile_cb(pct):
+                p = 65 + int(pct * 30)
+                q.put({"type": "progress", "percent": min(p, 95),
+                       "message": f"合成影片 {int(pct*100)}%"})
+
+            result = _compile_highlight(
+                clips, clip_duration, out_path, transition,
+                transition_dur, resolution, compile_cb,
+            )
+
+            if result and os.path.isfile(result):
+                rel_path = f"extracts/{sanitize_name(person)}/{out_name}"
+                fsize = os.path.getsize(result)
+                q.put({
+                    "type": "done",
+                    "filename": out_name,
+                    "rel_path": rel_path,
+                    "file_url": f"/yt-files/{rel_path}",
+                    "file_size_mb": round(fsize / 1024 / 1024, 1),
+                    "clips_count": len(clips),
+                    "duration": round(actual_dur, 1),
+                })
+            else:
+                q.put({"type": "error", "message": "FFmpeg 合成失敗"})
+
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return jsonify({"task_id": task_id})
+
+
+@app.route("/api/yt/highlight-progress/<task_id>")
+def api_yt_highlight_progress(task_id):
+    """精華影片 SSE 進度"""
+    def generate():
+        with highlight_tasks_lock:
+            task = highlight_tasks.get(task_id)
+        if not task:
+            yield f"data: {json.dumps({'type': 'error', 'message': '任務不存在'})}\n\n"
+            return
+        q = task["queue"]
+        while True:
+            try:
+                evt = q.get(timeout=30)
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                if evt.get("type") in ("done", "error"):
+                    break
+            except Empty:
+                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        with highlight_tasks_lock:
+            highlight_tasks.pop(task_id, None)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/yt/highlight-persons")
+def api_yt_highlight_persons():
+    """列出有擷取影片的人物"""
+    persons = []
+    if os.path.isdir(YT_EXTRACTS):
+        exts = {".mp4", ".mkv", ".webm"}
+        for d in sorted(os.listdir(YT_EXTRACTS)):
+            dp = os.path.join(YT_EXTRACTS, d)
+            if not os.path.isdir(dp):
+                continue
+            vids = [f for f in os.listdir(dp)
+                    if os.path.splitext(f)[1].lower() in exts
+                    and not f.startswith("highlight_")]
+            if vids:
+                persons.append({"name": d, "video_count": len(vids)})
+    return jsonify(persons)
 
 
 # ══════════════════════════════════════════════════════════
@@ -2463,6 +2857,83 @@ justify-content:center;align-items:center;cursor:zoom-out}
   <span class="progress-text" id="extract-prog-text">0%</span>
 </div>
 <div id="extract-msg" style="font-size:.82em;color:var(--txt2);margin-top:6px"></div>
+</div>
+
+<div id="yt-highlight-card" class="card">
+<h3>🎬 精華影片</h3>
+<div class="row" style="flex-wrap:wrap;gap:8px;align-items:end">
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">人物</label>
+    <select id="hl-person" style="min-width:120px" onchange="hlLoadPersonInfo()"></select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">策略</label>
+    <select id="hl-strategy">
+      <option value="balanced">均衡</option>
+      <option value="closeup">特寫優先</option>
+      <option value="dynamic">動態優先</option>
+      <option value="random">隨機</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">每段秒數</label>
+    <select id="hl-clip-dur">
+      <option value="2">2 秒</option>
+      <option value="3" selected>3 秒</option>
+      <option value="4">4 秒</option>
+      <option value="5">5 秒</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">總長度</label>
+    <select id="hl-total-dur">
+      <option value="15">15 秒</option>
+      <option value="30" selected>30 秒</option>
+      <option value="45">45 秒</option>
+      <option value="60">60 秒</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">每部最多取</label>
+    <select id="hl-max-per">
+      <option value="2">2 段</option>
+      <option value="3">3 段</option>
+      <option value="5" selected>5 段</option>
+      <option value="0">不限</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">過場</label>
+    <select id="hl-transition" onchange="document.getElementById('hl-xfade-dur').style.display=this.value==='crossfade'?'':'none'">
+      <option value="crossfade" selected>淡入淡出</option>
+      <option value="cut">直切</option>
+    </select>
+  </div>
+  <div id="hl-xfade-dur">
+    <label style="font-size:.8em;color:var(--txt2)">過場秒數</label>
+    <select id="hl-xfade-val">
+      <option value="0.3">0.3 秒</option>
+      <option value="0.5" selected>0.5 秒</option>
+      <option value="0.8">0.8 秒</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">解析度</label>
+    <select id="hl-resolution">
+      <option value="720p" selected>720p</option>
+      <option value="1080p">1080p</option>
+    </select>
+  </div>
+</div>
+<div style="margin-top:10px">
+  <span id="hl-person-info" style="font-size:.82em;color:var(--txt2)"></span>
+</div>
+<button class="btn btn-pri" onclick="ytHighlight()" id="btn-highlight" style="margin-top:10px">🎬 開始製作精華</button>
+<div class="progress-wrap" id="hl-prog-wrap" style="display:none;margin-top:8px">
+  <div class="progress-bar" id="hl-prog-bar" style="width:0%"></div>
+  <span class="progress-text" id="hl-prog-text">0%</span>
+</div>
+<div id="hl-msg" style="font-size:.82em;color:var(--txt2);margin-top:6px"></div>
 </div>
 
 <div class="card">
@@ -3340,6 +3811,121 @@ function extractListenSSE(taskId){
   extractES.onerror = ()=>{ extractES.close(); extractES=null;
     document.getElementById('btn-extract').disabled = false; };
 }
+
+// ═══════════ 精華影片 ═══════════════════════════════════
+let hlES = null;
+
+async function hlLoadPersons(){
+  try{
+    const r = await fetch('/api/yt/highlight-persons');
+    const list = await r.json();
+    const sel = document.getElementById('hl-person');
+    if(!list.length){
+      sel.innerHTML = '<option value="">（無可用影片）</option>';
+      document.getElementById('hl-person-info').textContent = '請先擷取人物影片';
+      return;
+    }
+    sel.innerHTML = list.map(p =>
+      '<option value="'+p.name+'">'+p.name+' ('+p.video_count+'部)</option>'
+    ).join('');
+    hlLoadPersonInfo();
+  }catch(e){}
+}
+
+function hlLoadPersonInfo(){
+  const sel = document.getElementById('hl-person');
+  const info = document.getElementById('hl-person-info');
+  if(sel.value){
+    info.textContent = '將從 '+sel.selectedOptions[0].textContent+' 的擷取影片製作精華';
+  }
+}
+
+async function ytHighlight(){
+  const person = document.getElementById('hl-person').value;
+  if(!person) return alert('請選擇人物');
+
+  const opts = {
+    person,
+    strategy: document.getElementById('hl-strategy').value,
+    clip_duration: parseFloat(document.getElementById('hl-clip-dur').value),
+    total_duration: parseFloat(document.getElementById('hl-total-dur').value),
+    max_per_video: parseInt(document.getElementById('hl-max-per').value),
+    transition: document.getElementById('hl-transition').value,
+    transition_dur: parseFloat(document.getElementById('hl-xfade-val').value),
+    resolution: document.getElementById('hl-resolution').value,
+  };
+
+  document.getElementById('btn-highlight').disabled = true;
+  document.getElementById('hl-prog-wrap').style.display = '';
+  document.getElementById('hl-prog-bar').style.width = '0%';
+  document.getElementById('hl-prog-text').textContent = '0%';
+  document.getElementById('hl-msg').textContent = '啟動中...';
+  document.getElementById('hl-msg').style.color = 'var(--txt2)';
+
+  try{
+    const r = await fetch('/api/yt/highlight',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(opts)
+    });
+    const d = await r.json();
+    if(d.error){
+      document.getElementById('hl-msg').textContent = '錯誤: '+d.error;
+      document.getElementById('hl-msg').style.color = 'var(--err)';
+      document.getElementById('btn-highlight').disabled = false;
+      return;
+    }
+    hlListenSSE(d.task_id);
+  }catch(e){
+    document.getElementById('hl-msg').textContent = '連線失敗: '+e;
+    document.getElementById('hl-msg').style.color = 'var(--err)';
+    document.getElementById('btn-highlight').disabled = false;
+  }
+}
+
+function hlListenSSE(taskId){
+  if(hlES) hlES.close();
+  hlES = new EventSource('/api/yt/highlight-progress/'+taskId);
+  hlES.onmessage = (e)=>{
+    const d = JSON.parse(e.data);
+    switch(d.type){
+      case 'progress':
+        const pct = Math.round(d.percent||0);
+        document.getElementById('hl-prog-bar').style.width = pct+'%';
+        document.getElementById('hl-prog-text').textContent = pct+'%';
+        document.getElementById('hl-msg').textContent = d.message||'';
+        break;
+      case 'done':
+        hlES.close(); hlES=null;
+        document.getElementById('hl-prog-bar').style.width = '100%';
+        document.getElementById('hl-prog-text').textContent = '100%';
+        document.getElementById('hl-msg').innerHTML =
+          '✅ 完成！'+d.clips_count+' 個片段（'+d.duration+'秒）'
+          +' <a href="'+d.file_url+'" target="_blank" style="color:var(--pri)">'+d.filename+'</a>'
+          +' ('+d.file_size_mb+'MB)';
+        document.getElementById('btn-highlight').disabled = false;
+        ytLoadDownloads();
+        break;
+      case 'error':
+        hlES.close(); hlES=null;
+        document.getElementById('hl-msg').textContent = '❌ '+d.message;
+        document.getElementById('hl-msg').style.color = 'var(--err)';
+        document.getElementById('btn-highlight').disabled = false;
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  hlES.onerror = ()=>{ hlES.close(); hlES=null;
+    document.getElementById('btn-highlight').disabled = false; };
+}
+
+// 切換到 YouTube 分頁時載入精華人物列表
+(function(){
+  const origSwitch = window.switchTab;
+  window.switchTab = function(tab){
+    origSwitch(tab);
+    if(tab === 'yt') hlLoadPersons();
+  };
+})();
 </script>
 </body>
 </html>
