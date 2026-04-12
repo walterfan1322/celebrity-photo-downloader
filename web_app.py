@@ -69,6 +69,7 @@ DB_PATH = os.path.join(DATA_DIR, "history.db")
 PHASH_THRESHOLD = 8
 MAX_FILE_SIZE = 20 * 1024 * 1024
 PORT = int(os.environ.get("PORT", "5000"))
+CHROME_DEBUG_PORT = int(os.environ.get("CHROME_DEBUG_PORT", "9222"))
 
 HEADERS = {
     "User-Agent": (
@@ -1525,6 +1526,92 @@ yt_tasks = {}
 yt_tasks_lock = threading.Lock()
 
 
+_tiktok_chrome_lock = threading.Lock()
+
+def _tiktok_search(keyword, max_results=10):
+    """用 DrissionPage 連接持久 Chrome 抓取 TikTok 搜尋結果"""
+    import re as _re
+    try:
+        from DrissionPage import ChromiumPage, ChromiumOptions
+    except ImportError:
+        logging.warning("TikTok search: DrissionPage not installed")
+        return []
+    results = []
+    if not _tiktok_chrome_lock.acquire(timeout=30):
+        logging.warning("TikTok search: another search in progress")
+        return []
+    try:
+        import time as _time
+        from urllib.parse import quote
+        co = ChromiumOptions()
+        co.set_local_port(CHROME_DEBUG_PORT)
+        logging.info(f"TikTok search: connecting to Chrome port {CHROME_DEBUG_PORT} for '{keyword}'")
+        page = ChromiumPage(co)
+        # 導航到 TikTok 搜尋
+        search_url = f"https://www.tiktok.com/search/video?q={quote(keyword)}"
+        page.get(search_url)
+        _time.sleep(7)
+        # 取得影片描述 / 觀看數元素
+        desc_els = page.eles('css:[data-e2e="search-card-desc"]')
+        view_els = page.eles('css:[data-e2e="video-views"]')
+        # 取得所有影片連結
+        html = page.html
+        video_links = _re.findall(
+            r'href="(https://www\.tiktok\.com/@([\w.]+)/video/(\d+))"', html
+        )
+        # 去重
+        seen = set()
+        unique = []
+        for full_url, author, vid_id in video_links:
+            if vid_id not in seen:
+                seen.add(vid_id)
+                unique.append({"url": full_url, "author": author, "id": vid_id})
+        # 取得縮圖（排除頭像）
+        thumb_els = page.eles('css:img[src*="tiktokcdn"]')
+        thumbs = [img.attr('src') for img in thumb_els
+                  if '/avt-' not in (img.attr('src') or '')]
+        for i, v in enumerate(unique[:max_results]):
+            desc_text = ""
+            if i < len(desc_els):
+                raw = desc_els[i].text or ""
+                desc_text = raw.split('\n')[0].strip()
+            view_text = ""
+            if i < len(view_els):
+                view_text = (view_els[i].text or "").strip()
+            view_count = 0
+            if view_text:
+                try:
+                    vt = view_text.upper().replace(",", "")
+                    if "M" in vt:
+                        view_count = int(float(vt.replace("M", "")) * 1_000_000)
+                    elif "K" in vt:
+                        view_count = int(float(vt.replace("K", "")) * 1_000)
+                    else:
+                        view_count = int(vt)
+                except Exception:
+                    pass
+            thumb = thumbs[i] if i < len(thumbs) else ""
+            results.append({
+                "id": v["id"],
+                "title": desc_text,
+                "url": v["url"],
+                "duration": None,
+                "channel": v["author"],
+                "view_count": view_count,
+                "thumbnail": thumb,
+                "platform": "tiktok",
+            })
+        logging.info(f"TikTok search: found {len(results)} results for '{keyword}'")
+        # 注意：不要 quit Chrome，保持持久連線
+    except Exception as e:
+        import traceback
+        logging.warning(f"TikTok search error: {type(e).__name__}: {e}")
+        logging.warning(traceback.format_exc())
+    finally:
+        _tiktok_chrome_lock.release()
+    return results
+
+
 @app.route("/api/yt/search", methods=["POST"])
 def api_yt_search():
     if not HAS_YTDLP:
@@ -1534,11 +1621,28 @@ def api_yt_search():
     if not query:
         return jsonify({"error": "請輸入搜尋關鍵字"}), 400
     max_results = int(data.get("max_results", 10))
+    video_type = (data.get("video_type") or "all").strip()
+    platform = (data.get("platform") or "youtube").strip().lower()
+
+    # 影片類型關鍵字對照（YouTube 專用）
+    VIDEO_TYPE_KEYWORDS = {
+        "stage": "stage performance live",
+        "fancam": "fancam 직캠",
+        "music_show": "Music Core OR Music Bank OR Inkigayo OR M Countdown",
+        "mv": "MV official",
+    }
 
     # 判斷是否為 URL
     is_url = query.startswith("http://") or query.startswith("https://")
+    # 自動偵測平台
+    if is_url:
+        if "tiktok.com" in query:
+            platform = "tiktok"
+        elif "youtube.com" in query or "youtu.be" in query:
+            platform = "youtube"
 
     try:
+        tiktok_hint = ""
         ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
         if is_url:
             ydl_opts["noplaylist"] = True
@@ -1546,9 +1650,30 @@ def api_yt_search():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             if is_url:
                 info = ydl.extract_info(query, download=False)
-                entries = [info] if info.get("_type") != "playlist" else info.get("entries", [])
+                entries = [info] if info.get("_type") != "playlist" else (info.get("entries") or [])
+            elif platform == "tiktok":
+                # TikTok 搜尋策略
+                if query.startswith("@"):
+                    # 使用者頁面 — 透過 yt-dlp
+                    tiktok_url = f"https://www.tiktok.com/{query}"
+                    info = ydl.extract_info(tiktok_url, download=False)
+                    entries = (info.get("entries") or [])[:max_results]
+                else:
+                    # 關鍵字搜尋 — 使用 DrissionPage 抓 TikTok 搜尋頁
+                    entries = []
+                    tiktok_results = _tiktok_search(query, max_results)
+                    if tiktok_results:
+                        # 直接回傳 TikTok 搜尋結果，跳過 yt-dlp 解析
+                        resp = {"results": tiktok_results}
+                        return jsonify(resp)
+                    else:
+                        tiktok_hint = "TikTok 搜尋暫時無法取得結果，請貼上影片網址或輸入 @用戶名"
             else:
-                info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
+                # YouTube 搜尋
+                search_query = query
+                if video_type in VIDEO_TYPE_KEYWORDS:
+                    search_query = f"{query} {VIDEO_TYPE_KEYWORDS[video_type]}"
+                info = ydl.extract_info(f"ytsearch{max_results}:{search_query}", download=False)
                 entries = info.get("entries", [])
 
         results = []
@@ -1556,16 +1681,29 @@ def api_yt_search():
             if not e:
                 continue
             vid_id = e.get("id", "")
+            vid_url = e.get("url") or e.get("webpage_url") or ""
+            if not vid_url and vid_id:
+                if platform == "tiktok":
+                    vid_url = f"https://www.tiktok.com/video/{vid_id}"
+                else:
+                    vid_url = f"https://www.youtube.com/watch?v={vid_id}"
             results.append({
                 "id": vid_id,
                 "title": e.get("title", ""),
-                "url": e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={vid_id}",
+                "url": vid_url,
                 "duration": e.get("duration"),
-                "channel": e.get("channel") or e.get("uploader", ""),
+                "channel": e.get("channel") or e.get("uploader") or e.get("creator", ""),
                 "view_count": e.get("view_count"),
-                "thumbnail": e.get("thumbnail") or f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg",
+                "thumbnail": e.get("thumbnail") or (f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg" if platform == "youtube" else ""),
+                "platform": platform,
             })
-        return jsonify({"results": results})
+        resp = {"results": results}
+        # 加入 TikTok 搜尋提示
+        if tiktok_hint:
+            resp["hint"] = tiktok_hint
+        elif platform == "tiktok" and not is_url and not results:
+            resp["hint"] = "TikTok 搜尋建議：貼上影片網址、或輸入 @用戶名 瀏覽其影片"
+        return jsonify(resp)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1618,9 +1756,10 @@ def api_yt_download():
                 elif d["status"] == "finished":
                     q.put({"type": "progress", "percent": 96, "message": "合併/轉檔中..."})
 
+            out_tpl = os.path.join(dl_dir, "%(title).80s [%(id)s].%(ext)s")
             ydl_opts = {
                 "format": quality,
-                "outtmpl": os.path.join(dl_dir, "%(title).80s [%(id)s].%(ext)s"),
+                "outtmpl": out_tpl,
                 "progress_hooks": [progress_hook],
                 "merge_output_format": "mp4" if not audio_only else None,
                 "quiet": True,
@@ -1637,22 +1776,67 @@ def api_yt_download():
                 }]
                 ydl_opts.pop("merge_output_format", None)
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                info = ydl.sanitize_info(info)
+            info = None
+            # 嘗試下載，如果分流格式失敗則降級到單一格式
+            for attempt, fmt in enumerate([quality, "best"]):
+                if attempt > 0 and (audio_only or fmt == quality):
+                    break
+                try:
+                    ydl_opts_try = dict(ydl_opts, format=fmt)
+                    with yt_dlp.YoutubeDL(ydl_opts_try) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        info = ydl.sanitize_info(info)
+                    # 檢查是否真的下載了完整檔案（非 .part）
+                    vid_id_check = info.get("id", "")
+                    found_complete = False
+                    for fname in os.listdir(dl_dir):
+                        fp_chk = os.path.join(dl_dir, fname)
+                        if os.path.isfile(fp_chk) and vid_id_check in fname and not fname.endswith(".part"):
+                            if os.path.getsize(fp_chk) > 10240:  # > 10KB
+                                found_complete = True
+                                break
+                    if found_complete:
+                        if attempt > 0:
+                            q.put({"type": "progress", "percent": 95,
+                                   "message": "已降級為單一格式下載"})
+                        break
+                    elif attempt == 0:
+                        q.put({"type": "progress", "percent": 5,
+                               "message": "分流下載失敗，嘗試單一格式..."})
+                        # 清除失敗的 .part 檔案
+                        for fname in list(os.listdir(dl_dir)):
+                            if fname.endswith(".part") and vid_id_check in fname:
+                                try:
+                                    os.remove(os.path.join(dl_dir, fname))
+                                except OSError:
+                                    pass
+                except Exception as e_dl:
+                    if attempt == 0:
+                        q.put({"type": "progress", "percent": 5,
+                               "message": f"格式 {fmt} 失敗，嘗試降級..."})
+                    else:
+                        raise e_dl
 
-            # 找到實際輸出檔案
+            if info is None:
+                q.put({"type": "error", "message": "所有格式都下載失敗"})
+                return
+
+            # 找到實際輸出檔案（排除 .part）
             ext = "mp3" if audio_only else "mp4"
-
-            # 搜尋最新下載的檔案
             actual_file = None
             vid_id = info.get("id", "")
             for f in sorted(os.listdir(dl_dir), key=lambda x: os.path.getmtime(os.path.join(dl_dir, x)), reverse=True):
-                if os.path.isfile(os.path.join(dl_dir, f)) and vid_id in f:
-                    actual_file = f
-                    break
+                fp_c = os.path.join(dl_dir, f)
+                if os.path.isfile(fp_c) and vid_id in f and not f.endswith(".part"):
+                    if os.path.getsize(fp_c) > 10240:
+                        actual_file = f
+                        break
             if not actual_file:
-                files = [x for x in sorted(os.listdir(dl_dir), key=lambda x: os.path.getmtime(os.path.join(dl_dir, x)), reverse=True) if os.path.isfile(os.path.join(dl_dir, x))]
+                files = [x for x in sorted(os.listdir(dl_dir),
+                         key=lambda x: os.path.getmtime(os.path.join(dl_dir, x)), reverse=True)
+                         if os.path.isfile(os.path.join(dl_dir, x))
+                         and not x.endswith(".part")
+                         and os.path.getsize(os.path.join(dl_dir, x)) > 10240]
                 if files:
                     actual_file = files[0]
 
@@ -1671,7 +1855,14 @@ def api_yt_download():
                     "person": person_folder,
                 })
             else:
-                q.put({"type": "error", "message": "下載完成但找不到檔案"})
+                # 清除殘留的 .part 檔案
+                for fname in list(os.listdir(dl_dir)):
+                    if fname.endswith(".part") and vid_id in fname:
+                        try:
+                            os.remove(os.path.join(dl_dir, fname))
+                        except OSError:
+                            pass
+                q.put({"type": "error", "message": "下載完成但找不到完整檔案"})
 
         except Exception as e:
             q.put({"type": "error", "message": str(e)})
@@ -1984,10 +2175,23 @@ def api_yt_extract():
     if not os.path.isfile(video_path):
         return jsonify({"error": f"找不到影片: {filename}"}), 404
 
+    original_person = person
     person = resolve_celebrity(person)
     photo_dir = os.path.join(DOWNLOAD_ROOT, person)
     if not os.path.isdir(photo_dir):
-        return jsonify({"error": f"找不到 {person} 的照片資料夾，請先下載照片"}), 400
+        # 回傳可用的照片資料夾讓前端選擇
+        available = sorted([
+            d for d in os.listdir(DOWNLOAD_ROOT)
+            if os.path.isdir(os.path.join(DOWNLOAD_ROOT, d))
+               and not d.startswith(".")
+        ])
+        return jsonify({
+            "need_mapping": True,
+            "keyword": original_person,
+            "resolved": person,
+            "available_folders": available,
+            "message": f"找不到「{original_person}」的照片資料夾，請選擇要用哪個人物的照片進行辨識"
+        }), 200
 
     task_id = str(uuid.uuid4())[:8]
     q = Queue()
@@ -2235,12 +2439,14 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
 
 
 def _compile_highlight(clips, clip_duration, output_path, transition,
-                       transition_dur, resolution, progress_cb=None):
+                       transition_dur, resolution, progress_cb=None,
+                       audio_mode="original"):
     """用 FFmpeg 把片段合成精華影片"""
     ffmpeg = _get_ffmpeg()
     import tempfile, subprocess
 
-    res_map = {"720p": (1280, 720), "1080p": (1920, 1080)}
+    res_map = {"720p": (1280, 720), "1080p": (1920, 1080),
+                "720p_v": (720, 1280), "1080p_v": (1080, 1920)}
     tw, th = res_map.get(resolution, (1280, 720))
 
     temp_dir = tempfile.mkdtemp()
@@ -2258,7 +2464,12 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
                 "-vf", f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
                        f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            ]
+            if audio_mode == "mute":
+                cmd += ["-an"]
+            else:
+                cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
+            cmd += [
                 "-r", "30",
                 "-shortest",
                 seg_path,
@@ -2273,10 +2484,12 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
             return None
 
         # Phase 2: 合成
+        has_audio = (audio_mode != "mute")
         if transition == "crossfade" and len(seg_files) > 1 and transition_dur > 0:
             # xfade 鏈式過場
             result = _xfade_concat(ffmpeg, seg_files, clip_duration,
-                                   transition_dur, output_path, temp_dir)
+                                   transition_dur, output_path, temp_dir,
+                                   has_audio=has_audio)
         else:
             # 直接 concat
             list_path = os.path.join(temp_dir, "list.txt")
@@ -2298,7 +2511,8 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _xfade_concat(ffmpeg, seg_files, clip_dur, xfade_dur, output_path, temp_dir):
+def _xfade_concat(ffmpeg, seg_files, clip_dur, xfade_dur, output_path, temp_dir,
+                   has_audio=True):
     """用 xfade filter 鏈式合成片段"""
     import subprocess
     n = len(seg_files)
@@ -2324,19 +2538,24 @@ def _xfade_concat(ffmpeg, seg_files, clip_dur, xfade_dur, output_path, temp_dir)
         offset += clip_dur - xfade_dur
         prev = out
 
-    # 音訊 concat
-    audio_inputs = "".join(f"[{i}:a]" for i in range(n))
-    audio_filter = f"{audio_inputs}concat=n={n}:v=0:a=1[aout]"
+    filter_complex = ";".join(filters)
 
-    filter_complex = ";".join(filters) + ";" + audio_filter
+    if has_audio:
+        # 音訊 concat
+        audio_inputs = "".join(f"[{i}:a]" for i in range(n))
+        audio_filter = f"{audio_inputs}concat=n={n}:v=0:a=1[aout]"
+        filter_complex += ";" + audio_filter
 
     cmd = [
         ffmpeg, "-y",
     ] + inputs + [
         "-filter_complex", filter_complex,
-        "-map", "[vout]", "-map", "[aout]",
+        "-map", "[vout]",
+    ]
+    if has_audio:
+        cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "128k"]
+    cmd += [
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
         output_path,
     ]
     subprocess.run(cmd, capture_output=True, timeout=300)
@@ -2359,15 +2578,25 @@ def api_yt_highlight():
     if not os.path.isdir(person_dir):
         return jsonify({"error": f"找不到 {person} 的擷取影片"}), 400
 
-    # 收集該人的所有影片
+    # 收集影片（支援指定特定影片）
     exts = {".mp4", ".mkv", ".webm"}
-    videos = [os.path.join(person_dir, f) for f in os.listdir(person_dir)
-              if os.path.splitext(f)[1].lower() in exts
-              and not f.startswith("highlight_")]
+    selected_files = data.get("videos")  # 前端傳入的已選影片清單
+    if selected_files and isinstance(selected_files, list):
+        videos = []
+        for f in selected_files:
+            f = os.path.basename(f)  # 安全：只取檔名
+            fp = os.path.join(person_dir, f)
+            if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in exts:
+                videos.append(fp)
+    else:
+        videos = [os.path.join(person_dir, f) for f in os.listdir(person_dir)
+                  if os.path.splitext(f)[1].lower() in exts
+                  and not f.startswith("highlight_")]
     if not videos:
         return jsonify({"error": "沒有可用的擷取影片"}), 400
 
     # 讀取選項
+    audio_mode = data.get("audio_mode", "original")  # original / mute
     strategy = data.get("strategy", "balanced")
     clip_duration = float(data.get("clip_duration", 3))
     total_duration = float(data.get("total_duration", 30))
@@ -2428,6 +2657,7 @@ def api_yt_highlight():
             result = _compile_highlight(
                 clips, clip_duration, out_path, transition,
                 transition_dur, resolution, compile_cb,
+                audio_mode=audio_mode,
             )
 
             if result and os.path.isfile(result):
@@ -2496,6 +2726,464 @@ def api_yt_highlight_persons():
     return jsonify(persons)
 
 
+@app.route("/api/yt/highlight-videos/<person>")
+def api_yt_highlight_videos(person):
+    """列出某人物的擷取影片（供精華影片選擇）"""
+    person = sanitize_name(resolve_celebrity(person))
+    person_dir = os.path.join(YT_EXTRACTS, person)
+    if not os.path.isdir(person_dir):
+        return jsonify([])
+    exts = {".mp4", ".mkv", ".webm"}
+    videos = []
+    for f in sorted(os.listdir(person_dir)):
+        fp = os.path.join(person_dir, f)
+        if not os.path.isfile(fp):
+            continue
+        if os.path.splitext(f)[1].lower() not in exts:
+            continue
+        if f.startswith("highlight_"):
+            continue
+        size = os.path.getsize(fp)
+        # 取得影片時長
+        dur = None
+        try:
+            import cv2 as _cv2
+            cap = _cv2.VideoCapture(fp)
+            if cap.isOpened():
+                dur = round(cap.get(_cv2.CAP_PROP_FRAME_COUNT) / max(cap.get(_cv2.CAP_PROP_FPS), 1), 1)
+            cap.release()
+        except Exception:
+            pass
+        videos.append({
+            "filename": f,
+            "size_mb": round(size / 1024 / 1024, 1),
+            "duration": dur,
+            "url": f"/yt-files/extracts/{person}/{f}",
+        })
+    return jsonify(videos)
+
+
+# ══════════════════════════════════════════════════════════
+#  一鍵影片生成（自動化 pipeline）
+# ══════════════════════════════════════════════════════════
+auto_video_tasks = {}
+auto_video_tasks_lock = threading.Lock()
+
+
+@app.route("/api/auto-video", methods=["POST"])
+def api_auto_video():
+    """一鍵影片生成：TikTok搜尋 → 下載 → 人臉擷取 → 精華剪輯"""
+    if not HAS_YTDLP:
+        return jsonify({"error": "yt-dlp 未安裝"}), 500
+    if not HAS_FACE_MODELS or not HAS_CV2:
+        return jsonify({"error": "人臉模型或 OpenCV 未安裝"}), 500
+
+    data = request.json
+    person = (data.get("person") or "").strip()
+    if not person:
+        return jsonify({"error": "請輸入人物名稱"}), 400
+
+    search_keyword = (data.get("search_keyword") or "").strip() or person
+    max_videos = int(data.get("max_videos", 5))
+    clip_duration = float(data.get("clip_duration", 3))
+    total_duration = float(data.get("total_duration", 30))
+    strategy = data.get("strategy", "balanced")
+    transition = data.get("transition", "crossfade")
+    transition_dur = float(data.get("transition_dur", 0.5))
+    resolution = data.get("resolution", "720p_v")  # 預設直式
+    audio_mode = data.get("audio_mode", "original")
+    platform = data.get("platform", "tiktok")
+
+    # 先確認照片資料夾存在
+    resolved_person = resolve_celebrity(person)
+    photo_dir = os.path.join(DOWNLOAD_ROOT, resolved_person)
+    if not os.path.isdir(photo_dir):
+        available = sorted([
+            d for d in os.listdir(DOWNLOAD_ROOT)
+            if os.path.isdir(os.path.join(DOWNLOAD_ROOT, d))
+               and not d.startswith(".")
+        ])
+        return jsonify({
+            "need_mapping": True,
+            "keyword": person,
+            "resolved": resolved_person,
+            "available_folders": available,
+            "message": f"找不到「{person}」的照片資料夾，請選擇要用哪個人物的照片進行辨識"
+        }), 200
+
+    task_id = str(uuid.uuid4())[:8]
+    q = Queue()
+    with auto_video_tasks_lock:
+        auto_video_tasks[task_id] = {"queue": q, "status": "running"}
+
+    def worker():
+        try:
+            _auto_video_pipeline(
+                q, resolved_person, search_keyword, max_videos,
+                clip_duration, total_duration, strategy, transition,
+                transition_dur, resolution, audio_mode, platform
+            )
+        except Exception as e:
+            import traceback
+            logging.error(f"auto-video error: {traceback.format_exc()}")
+            q.put({"type": "error", "message": str(e)})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return jsonify({"task_id": task_id})
+
+
+def _auto_video_pipeline(q, person, search_keyword, max_videos,
+                          clip_duration, total_duration, strategy,
+                          transition, transition_dur, resolution,
+                          audio_mode, platform):
+    """完整 pipeline：搜尋 → 下載 → 擷取 → 精華剪輯"""
+    import subprocess
+
+    # ── Phase 1: 搜尋 (0-5%) ──
+    q.put({"type": "progress", "phase": "search", "percent": 0,
+           "message": f"🔍 搜尋 TikTok: {search_keyword}..."})
+
+    if platform == "tiktok":
+        if search_keyword.startswith("@"):
+            # yt-dlp 抓使用者頁面
+            try:
+                tiktok_url = f"https://www.tiktok.com/{search_keyword}"
+                ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(tiktok_url, download=False)
+                    entries = (info.get("entries") or [])[:max_videos]
+                search_results = [{
+                    "url": e.get("url") or e.get("webpage_url") or f"https://www.tiktok.com/video/{e.get('id','')}",
+                    "title": e.get("title", ""),
+                    "channel": e.get("channel") or e.get("uploader", ""),
+                    "id": e.get("id", ""),
+                } for e in entries if e]
+            except Exception as e:
+                q.put({"type": "error", "message": f"TikTok 搜尋失敗: {e}"})
+                return
+        else:
+            search_results = _tiktok_search(search_keyword, max_videos)
+    else:
+        # YouTube 搜尋
+        try:
+            ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch{max_videos}:{search_keyword}", download=False)
+                entries = info.get("entries", [])
+            search_results = [{
+                "url": e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id','')}",
+                "title": e.get("title", ""),
+                "channel": e.get("channel") or e.get("uploader", ""),
+                "id": e.get("id", ""),
+            } for e in entries if e]
+        except Exception as e:
+            q.put({"type": "error", "message": f"YouTube 搜尋失敗: {e}"})
+            return
+
+    if not search_results:
+        q.put({"type": "error", "message": f"搜尋「{search_keyword}」沒有結果"})
+        return
+
+    q.put({"type": "progress", "phase": "search", "percent": 5,
+           "message": f"✅ 找到 {len(search_results)} 個影片"})
+
+    # ── Phase 2: 下載 (5-35%) ──
+    person_folder = sanitize_name(person)
+    dl_dir = os.path.join(YT_DOWNLOADS, person_folder)
+    os.makedirs(dl_dir, exist_ok=True)
+
+    downloaded_files = []
+    for vi, v in enumerate(search_results):
+        url = v.get("url", "")
+        title = v.get("title", "") or f"video_{vi+1}"
+        pct_base = 5 + int(vi / len(search_results) * 30)
+        pct_end = 5 + int((vi + 1) / len(search_results) * 30)
+
+        q.put({"type": "progress", "phase": "download", "percent": pct_base,
+               "message": f"📥 下載 {vi+1}/{len(search_results)}: {title[:50]}..."})
+
+        try:
+            out_tpl = os.path.join(dl_dir, "%(title).80s [%(id)s].%(ext)s")
+            ydl_opts = {
+                "format": "bestvideo[height<=720]+bestaudio/best",
+                "outtmpl": out_tpl,
+                "merge_output_format": "mp4",
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+            }
+            if FFMPEG_LOCATION:
+                ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+
+            # 嘗試下載，失敗降級
+            info = None
+            for attempt, fmt in enumerate(["bestvideo[height<=720]+bestaudio/best", "best"]):
+                if attempt > 0 and fmt == ydl_opts["format"]:
+                    break
+                try:
+                    ydl_opts_try = dict(ydl_opts, format=fmt)
+                    with yt_dlp.YoutubeDL(ydl_opts_try) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        info = ydl.sanitize_info(info)
+                    break
+                except Exception:
+                    if attempt == 0:
+                        continue
+                    raise
+
+            if info:
+                vid_id = info.get("id", "")
+                actual_file = None
+                for f in sorted(os.listdir(dl_dir),
+                                key=lambda x: os.path.getmtime(os.path.join(dl_dir, x)),
+                                reverse=True):
+                    fp_c = os.path.join(dl_dir, f)
+                    if (os.path.isfile(fp_c) and vid_id in f
+                            and not f.endswith(".part")
+                            and os.path.getsize(fp_c) > 10240):
+                        actual_file = f
+                        break
+
+                if actual_file:
+                    rel_path = f"downloads/{person_folder}/{actual_file}"
+                    downloaded_files.append({
+                        "filename": actual_file,
+                        "rel_path": rel_path,
+                        "full_path": os.path.join(dl_dir, actual_file),
+                    })
+
+        except Exception as e:
+            logging.warning(f"auto-video download failed: {url} - {e}")
+            q.put({"type": "progress", "phase": "download", "percent": pct_end,
+                   "message": f"⚠️ 下載失敗: {title[:40]}... ({e})"})
+            continue
+
+        q.put({"type": "progress", "phase": "download", "percent": pct_end,
+               "message": f"✅ 已下載 {len(downloaded_files)}/{len(search_results)}"})
+
+    if not downloaded_files:
+        q.put({"type": "error", "message": "所有影片都下載失敗"})
+        return
+
+    q.put({"type": "progress", "phase": "download", "percent": 35,
+           "message": f"📥 下載完成：{len(downloaded_files)} 個影片"})
+
+    # ── Phase 3: 人臉擷取 (35-70%) ──
+    q.put({"type": "progress", "phase": "extract", "percent": 35,
+           "message": f"🧑 建立 {person} 的臉部特徵..."})
+
+    def emb_cb(pct):
+        p = 35 + int(pct * 5)
+        q.put({"type": "progress", "phase": "extract", "percent": min(p, 40),
+               "message": f"建立臉部特徵 {int(pct*100)}%"})
+
+    ref = _build_reference_embeddings(person, emb_cb)
+    if ref is None or len(ref) < 3:
+        q.put({"type": "error",
+               "message": f"{person} 的照片中找不到足夠的臉部特徵（至少需要 3 張）"})
+        return
+
+    q.put({"type": "progress", "phase": "extract", "percent": 40,
+           "message": f"✅ 使用 {len(ref)} 張臉部特徵，開始掃描影片..."})
+
+    extract_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
+    os.makedirs(extract_dir, exist_ok=True)
+    extracted_files = []
+
+    for vi, dlf in enumerate(downloaded_files):
+        video_path = dlf["full_path"]
+        vname = dlf["filename"]
+        pct_base = 40 + int(vi / len(downloaded_files) * 25)
+
+        q.put({"type": "progress", "phase": "extract", "percent": pct_base,
+               "message": f"🔍 掃描 {vi+1}/{len(downloaded_files)}: {vname[:40]}..."})
+
+        def scan_cb(pct, _vi=vi):
+            p = 40 + int((_vi + pct) / len(downloaded_files) * 25)
+            q.put({"type": "progress", "phase": "extract", "percent": min(p, 65),
+                   "message": f"掃描 {vname[:30]}... {int(pct*100)}%"})
+
+        timestamps = _scan_video_for_person(video_path, ref, scan_cb)
+        if not timestamps:
+            q.put({"type": "progress", "phase": "extract", "percent": pct_base + 5,
+                   "message": f"⏭️ {vname[:40]} 中未偵測到 {person}"})
+            continue
+
+        segments = _merge_segments(timestamps)
+        total_dur = sum(e - s for s, e in segments)
+
+        base = os.path.splitext(os.path.basename(vname))[0]
+        out_name = f"{base}_{person}.mp4"
+        out_path = os.path.join(extract_dir, out_name)
+        result = _extract_segments(video_path, segments, out_path)
+
+        if result and os.path.isfile(result):
+            extracted_files.append(result)
+            q.put({"type": "progress", "phase": "extract",
+                   "percent": 40 + int((vi + 1) / len(downloaded_files) * 25),
+                   "message": f"✅ 擷取 {len(segments)} 段（{total_dur:.1f}秒）from {vname[:30]}"})
+
+    if not extracted_files:
+        q.put({"type": "error", "message": f"所有影片中都未偵測到 {person}"})
+        return
+
+    q.put({"type": "progress", "phase": "extract", "percent": 70,
+           "message": f"🎯 擷取完成：{len(extracted_files)} 個影片包含 {person}"})
+
+    # ── Phase 4: 精華剪輯 (70-100%) ──
+    q.put({"type": "progress", "phase": "highlight", "percent": 70,
+           "message": "🎬 分析影片，挑選精彩片段..."})
+
+    all_scores = []
+    for vi, vpath in enumerate(extracted_files):
+        vname = os.path.basename(vpath)
+        def score_cb(pct, _vi=vi):
+            p = 70 + int((_vi + pct) / len(extracted_files) * 15)
+            q.put({"type": "progress", "phase": "highlight", "percent": min(p, 85),
+                   "message": f"分析 {vname[:30]}... {int(pct*100)}%"})
+
+        scores = _score_video_highlights(vpath, strategy, score_cb)
+        if scores:
+            all_scores.append((vpath, scores))
+
+    if not all_scores:
+        q.put({"type": "error", "message": "所有擷取影片都無法分析"})
+        return
+
+    max_per_video = max(2, int(total_duration / clip_duration / max(len(all_scores), 1)) + 1)
+    clips = _select_highlight_clips(all_scores, clip_duration,
+                                     total_duration, max_per_video)
+    if not clips:
+        q.put({"type": "error", "message": "找不到符合條件的片段"})
+        return
+
+    actual_dur = len(clips) * clip_duration
+    q.put({"type": "progress", "phase": "highlight", "percent": 87,
+           "message": f"✂️ 選出 {len(clips)} 個片段（{actual_dur:.0f}秒），合成中..."})
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_name = f"auto_{sanitize_name(person)}_{ts}.mp4"
+    out_path = os.path.join(extract_dir, out_name)
+
+    def compile_cb(pct):
+        p = 87 + int(pct * 12)
+        q.put({"type": "progress", "phase": "highlight", "percent": min(p, 99),
+               "message": f"合成影片 {int(pct*100)}%"})
+
+    result = _compile_highlight(
+        clips, clip_duration, out_path, transition,
+        transition_dur, resolution, compile_cb,
+        audio_mode=audio_mode,
+    )
+
+    if result and os.path.isfile(result):
+        rel_path = f"extracts/{sanitize_name(person)}/{out_name}"
+        fsize = os.path.getsize(result)
+        q.put({
+            "type": "done",
+            "filename": out_name,
+            "rel_path": rel_path,
+            "file_url": f"/yt-files/{rel_path}",
+            "file_size_mb": round(fsize / 1024 / 1024, 1),
+            "clips_count": len(clips),
+            "duration": round(actual_dur, 1),
+            "downloaded": len(downloaded_files),
+            "extracted": len(extracted_files),
+        })
+    else:
+        q.put({"type": "error", "message": "FFmpeg 合成失敗"})
+
+
+@app.route("/api/auto-video/progress/<task_id>")
+def api_auto_video_progress(task_id):
+    """一鍵影片生成 SSE 進度"""
+    def generate():
+        with auto_video_tasks_lock:
+            task = auto_video_tasks.get(task_id)
+        if not task:
+            yield f"data: {json.dumps({'type': 'error', 'message': '任務不存在'})}\n\n"
+            return
+        q = task["queue"]
+        while True:
+            try:
+                evt = q.get(timeout=60)
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                if evt.get("type") in ("done", "error"):
+                    break
+            except Empty:
+                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        with auto_video_tasks_lock:
+            auto_video_tasks.pop(task_id, None)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/yt/rotate", methods=["POST"])
+def api_yt_rotate():
+    """旋轉影片 (90/180/270 度)"""
+    import subprocess as _sp
+
+    data = request.json
+    rel_path = (data.get("rel_path") or "").strip()
+    angle = data.get("angle")
+
+    if not rel_path:
+        return jsonify({"error": "需要 rel_path"}), 400
+    if angle not in (90, 180, 270):
+        return jsonify({"error": "angle 須為 90, 180 或 270"}), 400
+
+    video_path = os.path.normpath(os.path.join(YT_ROOT, rel_path))
+    if not video_path.startswith(os.path.normpath(YT_ROOT)):
+        return jsonify({"error": "無效的檔案路徑"}), 400
+    if not os.path.isfile(video_path):
+        return jsonify({"error": f"找不到影片: {rel_path}"}), 404
+
+    ffmpeg_exe = _get_ffmpeg()
+    if angle == 90:
+        vf = "transpose=1"
+    elif angle == 270:
+        vf = "transpose=2"
+    else:
+        vf = "transpose=1,transpose=1"
+
+    dir_name = os.path.dirname(video_path)
+    base, ext = os.path.splitext(os.path.basename(video_path))
+    tmp_out = os.path.join(dir_name, f".rotating_{base}{ext}")
+
+    try:
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", video_path,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "copy",
+            "-map_metadata", "0",
+            tmp_out,
+        ]
+        result = _sp.run(cmd, capture_output=True, timeout=600)
+        if result.returncode != 0 or not os.path.isfile(tmp_out):
+            stderr = result.stderr.decode(errors="replace")[:500]
+            return jsonify({"error": f"FFmpeg 失敗: {stderr}"}), 500
+
+        os.replace(tmp_out, video_path)
+        size = os.path.getsize(video_path)
+        return jsonify({
+            "ok": True,
+            "rel_path": rel_path,
+            "size_mb": round(size / 1024 / 1024, 1),
+        })
+    except _sp.TimeoutExpired:
+        if os.path.isfile(tmp_out):
+            os.remove(tmp_out)
+        return jsonify({"error": "FFmpeg 逾時（影片可能太大）"}), 500
+    except Exception as e:
+        if os.path.isfile(tmp_out):
+            os.remove(tmp_out)
+        return jsonify({"error": str(e)}), 500
+
+
 # ══════════════════════════════════════════════════════════
 #  HTML 前端
 # ══════════════════════════════════════════════════════════
@@ -2524,13 +3212,18 @@ header small{display:block;font-size:.45em;color:var(--txt2);font-weight:400;mar
 .tab-content.active{display:block}
 /* YT specific */
 .yt-results{display:grid;gap:12px;margin-top:12px}
-.yt-item{display:flex;gap:12px;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:10px;cursor:pointer;transition:box-shadow .2s}
+.yt-item{display:flex;gap:12px;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:10px;cursor:pointer;transition:box-shadow .2s;position:relative}
 .yt-item:hover{box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.yt-item.yt-checked{border-color:var(--pri);background:rgba(99,102,241,.05)}
 .yt-item img{width:180px;height:101px;object-fit:cover;border-radius:6px;flex-shrink:0}
 .yt-item-info{flex:1;min-width:0}
 .yt-item-title{font-weight:600;font-size:.92em;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .yt-item-meta{font-size:.8em;color:var(--txt2)}
 .yt-item-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.yt-item-cb{position:absolute;top:8px;right:8px;width:22px;height:22px;cursor:pointer;accent-color:var(--pri);z-index:2}
+.yt-batch-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;background:var(--pri);color:#fff;border-radius:10px;margin-bottom:10px;font-size:.88em;flex-wrap:wrap}
+.yt-batch-bar button{background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.4);padding:5px 14px;border-radius:6px;cursor:pointer;font-size:.9em;font-weight:500}
+.yt-batch-bar button:hover{background:rgba(255,255,255,.35)}
 .yt-dl-list{display:grid;gap:8px;margin-top:12px}
 .yt-dl-item{display:flex;align-items:center;gap:10px;padding:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:.88em;flex-wrap:wrap}
 .yt-dl-item .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2630,7 +3323,8 @@ justify-content:center;align-items:center;cursor:zoom-out}
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('photo')">📸 Photo Download</button>
-  <button class="tab-btn" onclick="switchTab('yt')">🎬 YouTube 下載</button>
+  <button class="tab-btn" onclick="switchTab('yt')">🎬 影片下載</button>
+  <button class="tab-btn" onclick="switchTab('autovid')">🚀 一鍵生成</button>
 </div>
 
 <!-- ═══════════ TAB 1: Photo Download ═══════════ -->
@@ -2804,14 +3498,26 @@ justify-content:center;align-items:center;cursor:zoom-out}
 <div id="tab-yt" class="tab-content">
 
 <div class="card">
-<h3>🔍 搜尋 YouTube</h3>
+<h3>🔍 搜尋影片</h3>
 <div class="row">
-  <input type="text" id="yt-query" placeholder="輸入關鍵字或貼上 YouTube 網址" style="flex:1"
+  <select id="yt-platform" style="min-width:110px" onchange="onPlatformChange()">
+    <option value="youtube" selected>YouTube</option>
+    <option value="tiktok">TikTok</option>
+  </select>
+  <input type="text" id="yt-query" placeholder="輸入關鍵字或貼上 YouTube / TikTok 網址" style="flex:1"
          onkeydown="if(event.key==='Enter')ytSearch()">
   <button class="btn btn-pri" onclick="ytSearch()" id="btn-yt-search">搜尋</button>
 </div>
-<div class="row">
-  <label>搜尋數量</label>
+<div class="row" id="yt-type-row">
+  <label>影片類型</label>
+  <select id="yt-video-type">
+    <option value="all">全部</option>
+    <option value="stage" selected>舞台表演</option>
+    <option value="fancam">直拍 (Fancam)</option>
+    <option value="music_show">音樂節目</option>
+    <option value="mv">MV</option>
+  </select>
+  <label style="margin-left:16px">搜尋數量</label>
   <select id="yt-max-results">
     <option value="5">5</option>
     <option value="10" selected>10</option>
@@ -2841,6 +3547,13 @@ justify-content:center;align-items:center;cursor:zoom-out}
 
 <div id="yt-results-card" class="card" style="display:none">
 <h3>搜尋結果</h3>
+<div id="yt-batch-bar" class="yt-batch-bar" style="display:none">
+  <input type="checkbox" id="yt-select-all" style="width:18px;height:18px;cursor:pointer;accent-color:#fff"
+         onchange="ytToggleAll(this.checked)">
+  <span id="yt-batch-count">已選 0 部</span>
+  <button onclick="ytBatchAction('download')">⬇ 批量下載</button>
+  <button onclick="ytBatchAction('extract')">🎯 批量下載+擷取</button>
+</div>
 <div id="yt-results" class="yt-results"></div>
 </div>
 
@@ -2857,6 +3570,20 @@ justify-content:center;align-items:center;cursor:zoom-out}
   <span class="progress-text" id="extract-prog-text">0%</span>
 </div>
 <div id="extract-msg" style="font-size:.82em;color:var(--txt2);margin-top:6px"></div>
+</div>
+
+<!-- 人物對應選擇對話框 -->
+<div id="yt-mapping-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;justify-content:center;align-items:center">
+<div style="background:#fff;border-radius:12px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.2)">
+  <h3 style="margin:0 0 8px">⚠️ 找不到照片資料夾</h3>
+  <p id="mapping-msg" style="font-size:.9em;color:var(--txt2);margin:0 0 16px"></p>
+  <label style="font-size:.85em;font-weight:600">選擇要用哪個人物的照片辨識：</label>
+  <select id="mapping-select" style="width:100%;padding:8px;margin:8px 0 16px;font-size:1em;border-radius:6px;border:1px solid #ccc"></select>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn" onclick="ytMappingCancel()" style="background:#eee;color:#333">取消</button>
+    <button class="btn btn-pri" onclick="ytMappingConfirm()">✅ 確認並擷取</button>
+  </div>
+</div>
 </div>
 
 <div id="yt-highlight-card" class="card">
@@ -2924,6 +3651,22 @@ justify-content:center;align-items:center;cursor:zoom-out}
       <option value="1080p">1080p</option>
     </select>
   </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">音訊</label>
+    <select id="hl-audio-mode">
+      <option value="original" selected>保留原音</option>
+      <option value="mute">靜音</option>
+    </select>
+  </div>
+</div>
+<div id="hl-video-list" style="margin-top:10px;display:none">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+    <span style="font-size:.82em;font-weight:600;color:var(--txt2)">選擇影片來源</span>
+    <label style="font-size:.78em;color:var(--pri);cursor:pointer">
+      <input type="checkbox" id="hl-select-all" checked onchange="hlToggleAllVideos(this.checked)"> 全選
+    </label>
+  </div>
+  <div id="hl-videos" style="display:grid;gap:4px;max-height:180px;overflow-y:auto;padding-right:4px"></div>
 </div>
 <div style="margin-top:10px">
   <span id="hl-person-info" style="font-size:.82em;color:var(--txt2)"></span>
@@ -2945,6 +3688,121 @@ justify-content:center;align-items:center;cursor:zoom-out}
 </div>
 
 </div><!-- /tab-yt -->
+
+<!-- ═══════════ TAB 3: 一鍵生成 ═══════════ -->
+<div id="tab-autovid" class="tab-content">
+
+<div class="card">
+<h3>🚀 一鍵影片生成</h3>
+<p style="font-size:.82em;color:var(--txt2);margin-bottom:12px">
+  輸入人物名稱，自動完成：TikTok 搜尋 → 下載 → 人臉辨識擷取 → 精華剪輯
+</p>
+<div class="row">
+  <label>人物名稱</label>
+  <input type="text" id="av-person" placeholder="例: ahyeon, karina, wonyoung"
+         onkeydown="if(event.key==='Enter')autoVideoStart()">
+</div>
+<div class="row">
+  <label>搜尋關鍵字</label>
+  <input type="text" id="av-keyword" placeholder="(選填) 預設同人物名稱，可輸入更精確的關鍵字">
+</div>
+<div class="row" style="flex-wrap:wrap;gap:8px;align-items:end">
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">平台</label>
+    <select id="av-platform">
+      <option value="tiktok" selected>TikTok</option>
+      <option value="youtube">YouTube</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">下載數量</label>
+    <select id="av-max-videos">
+      <option value="3">3 部</option>
+      <option value="5" selected>5 部</option>
+      <option value="8">8 部</option>
+      <option value="10">10 部</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">策略</label>
+    <select id="av-strategy">
+      <option value="balanced" selected>均衡</option>
+      <option value="closeup">特寫優先</option>
+      <option value="dynamic">動態優先</option>
+      <option value="random">隨機</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">每段秒數</label>
+    <select id="av-clip-dur">
+      <option value="2">2 秒</option>
+      <option value="3" selected>3 秒</option>
+      <option value="4">4 秒</option>
+      <option value="5">5 秒</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">總長度</label>
+    <select id="av-total-dur">
+      <option value="15">15 秒</option>
+      <option value="30" selected>30 秒</option>
+      <option value="45">45 秒</option>
+      <option value="60">60 秒</option>
+      <option value="90">90 秒</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">方向</label>
+    <select id="av-orientation">
+      <option value="vertical" selected>直式 (9:16 TikTok)</option>
+      <option value="horizontal">橫式 (16:9)</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">解析度</label>
+    <select id="av-resolution">
+      <option value="720" selected>720p</option>
+      <option value="1080">1080p</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">過場</label>
+    <select id="av-transition">
+      <option value="crossfade" selected>淡入淡出</option>
+      <option value="cut">直切</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">音訊</label>
+    <select id="av-audio">
+      <option value="original" selected>保留原音</option>
+      <option value="mute">靜音</option>
+    </select>
+  </div>
+</div>
+<div style="margin-top:14px">
+  <button class="btn btn-pri" id="btn-auto-video" onclick="autoVideoStart()"
+          style="font-size:1em;padding:10px 32px">🚀 一鍵生成影片</button>
+</div>
+</div>
+
+<div id="av-progress-card" class="card" style="display:none">
+<h3 id="av-phase-title">⏳ 處理中...</h3>
+<div class="progress-wrap">
+  <div class="progress-bar" id="av-prog-bar" style="width:0%"></div>
+  <span class="progress-text" id="av-prog-text">0%</span>
+</div>
+<div id="av-prog-msg" style="font-size:.88em;color:var(--txt2);margin-top:8px"></div>
+<div id="av-log" style="max-height:200px;overflow-y:auto;font-family:Consolas,monospace;font-size:.78em;line-height:1.8;padding:8px;background:#F9FAFB;border-radius:8px;margin-top:10px"></div>
+</div>
+
+<div id="av-result-card" class="card" style="display:none">
+<h3>🎉 生成完成</h3>
+<div id="av-result-info" style="margin-bottom:12px"></div>
+<div id="av-result-video" style="text-align:center"></div>
+</div>
+
+</div><!-- /tab-autovid -->
 
 <!-- 圖庫彈窗 -->
 <div class="modal" id="gallery-modal">
@@ -3560,10 +4418,32 @@ function _fmtViews(n){
   return n+'';
 }
 
+function onPlatformChange(){
+  const p = document.getElementById('yt-platform').value;
+  const typeRow = document.getElementById('yt-type-row');
+  const inp = document.getElementById('yt-query');
+  if(p === 'tiktok'){
+    typeRow.style.display = 'none';
+    inp.placeholder = '輸入關鍵字搜尋、貼上 TikTok 網址、或 @用戶名';
+  } else {
+    typeRow.style.display = '';
+    inp.placeholder = '輸入關鍵字或貼上 YouTube / TikTok 網址';
+  }
+}
+
 async function ytSearch(){
   const query = document.getElementById('yt-query').value.trim();
   if(!query) return alert('請輸入搜尋關鍵字或網址');
   const maxResults = parseInt(document.getElementById('yt-max-results').value);
+  const videoType = document.getElementById('yt-video-type').value;
+  let platform = document.getElementById('yt-platform').value;
+  // 自動偵測 URL 平台
+  if(query.startsWith('http')){
+    if(query.includes('tiktok.com')) platform = 'tiktok';
+    else if(query.includes('youtube.com')||query.includes('youtu.be')) platform = 'youtube';
+    document.getElementById('yt-platform').value = platform;
+    onPlatformChange();
+  }
   const btn = document.getElementById('btn-yt-search');
   const status = document.getElementById('yt-search-status');
   btn.disabled = true;
@@ -3573,12 +4453,14 @@ async function ytSearch(){
   try{
     const r = await fetch('/api/yt/search',{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query, max_results:maxResults})
+      body:JSON.stringify({query, max_results:maxResults, video_type:videoType, platform})
     });
     const d = await r.json();
     if(d.error){status.textContent = '錯誤: '+d.error; return;}
     const results = d.results||[];
-    status.textContent = '找到 '+results.length+' 個結果';
+    let msg = '找到 '+results.length+' 個結果';
+    if(d.hint) msg += ' — '+d.hint;
+    status.textContent = msg;
     renderYtResults(results);
   }catch(e){
     status.textContent = '搜尋失敗: '+e;
@@ -3594,7 +4476,10 @@ function renderYtResults(results){
   _ytResults = results;
   const container = document.getElementById('yt-results');
   const card = document.getElementById('yt-results-card');
+  const batchBar = document.getElementById('yt-batch-bar');
   container.innerHTML = '';
+  batchBar.style.display = 'none';
+  document.getElementById('yt-select-all').checked = false;
   if(!results.length){card.style.display='none'; return;}
   card.style.display = '';
 
@@ -3604,27 +4489,341 @@ function renderYtResults(results){
     const durStr = _fmtDuration(v.duration);
     const viewStr = _fmtViews(v.view_count);
     const safeTitle = (v.title||'').replace(/</g,'&lt;');
-    div.innerHTML = '<img src="'+(v.thumbnail||'')+'" alt="" onerror="this.style.display=\'none\'">'
+    div.innerHTML = '<input type="checkbox" class="yt-item-cb" data-cb-idx="'+idx+'" onchange="ytUpdateBatch()">'
+      +'<img src="'+(v.thumbnail||'')+'" alt="" onerror="this.style.display=\'none\'">'
       +'<div class="yt-item-info">'
       +'<div class="yt-item-title">'+safeTitle+'</div>'
       +'<div class="yt-item-meta">'+(v.channel||'')+' · '+(durStr?durStr+' · ':'')+viewStr+' 次觀看</div>'
       +'<div class="yt-item-actions">'
       +'<button class="btn btn-pri" style="font-size:.8em;padding:4px 12px" data-yt-idx="'+idx+'">⬇ 下載</button>'
+      +'<button class="btn" style="font-size:.8em;padding:4px 12px;background:var(--ok);color:#fff" data-yt-extract-idx="'+idx+'">🎯 下載+擷取</button>'
       +'<a href="'+(v.url||'')+'" target="_blank" style="font-size:.8em;color:var(--pri);text-decoration:none;padding:4px 8px">▶ 開啟</a>'
       +'</div></div>';
     container.appendChild(div);
   });
-  // Event delegation for download buttons
+  // Event delegation for download & extract buttons
   container.onclick = (e)=>{
-    const btn = e.target.closest('[data-yt-idx]');
-    if(!btn) return;
-    const idx = parseInt(btn.dataset.ytIdx);
-    const v = _ytResults[idx];
-    if(!v) return;
-    const quality = document.getElementById('yt-quality').value;
-    const keyword = document.getElementById('yt-query').value.trim();
-    ytDownload(v.url, v.title, quality, keyword);
+    if(e.target.classList.contains('yt-item-cb')) return; // let checkbox handle itself
+    const dlBtn = e.target.closest('[data-yt-idx]');
+    const exBtn = e.target.closest('[data-yt-extract-idx]');
+    if(dlBtn && !dlBtn.dataset.ytExtractIdx){
+      const idx = parseInt(dlBtn.dataset.ytIdx);
+      const v = _ytResults[idx];
+      if(!v) return;
+      const quality = document.getElementById('yt-quality').value;
+      const keyword = document.getElementById('yt-query').value.trim();
+      ytDownload(v.url, v.title, quality, keyword);
+    } else if(exBtn){
+      const idx = parseInt(exBtn.dataset.ytExtractIdx);
+      const v = _ytResults[idx];
+      if(!v) return;
+      const quality = document.getElementById('yt-quality').value;
+      const keyword = document.getElementById('yt-query').value.trim();
+      if(!keyword){ alert('搜尋關鍵字將作為擷取人物名稱，請確認搜尋欄有輸入'); return; }
+      ytDownloadAndExtract(v.url, v.title, quality, keyword);
+    }
   };
+}
+
+function ytUpdateBatch(){
+  const cbs = document.querySelectorAll('.yt-item-cb');
+  const checked = document.querySelectorAll('.yt-item-cb:checked');
+  const bar = document.getElementById('yt-batch-bar');
+  const allCb = document.getElementById('yt-select-all');
+  bar.style.display = checked.length > 0 ? 'flex' : 'none';
+  document.getElementById('yt-batch-count').textContent = '已選 '+checked.length+' 部';
+  allCb.checked = checked.length === cbs.length && cbs.length > 0;
+  // highlight checked items
+  cbs.forEach(cb=>{
+    const item = cb.closest('.yt-item');
+    if(cb.checked) item.classList.add('yt-checked');
+    else item.classList.remove('yt-checked');
+  });
+}
+
+function ytToggleAll(on){
+  document.querySelectorAll('.yt-item-cb').forEach(cb=>{ cb.checked = on; });
+  ytUpdateBatch();
+}
+
+let _ytBatchQueue = [];
+let _ytBatchMode = '';
+let _ytBatchDone = 0;
+let _ytBatchTotal = 0;
+
+function ytBatchAction(mode){
+  const checked = document.querySelectorAll('.yt-item-cb:checked');
+  if(!checked.length) return;
+  const keyword = document.getElementById('yt-query').value.trim();
+  if(mode === 'extract' && !keyword){
+    alert('搜尋關鍵字將作為擷取人物名稱，請確認搜尋欄有輸入');
+    return;
+  }
+  const quality = document.getElementById('yt-quality').value;
+  const indices = Array.from(checked).map(cb => parseInt(cb.dataset.cbIdx));
+  _ytBatchQueue = indices.map(i => _ytResults[i]).filter(Boolean);
+  _ytBatchMode = mode;
+  _ytBatchDone = 0;
+  _ytBatchTotal = _ytBatchQueue.length;
+
+  // Show progress
+  const progCard = document.getElementById('yt-progress-card');
+  progCard.style.display = '';
+  document.getElementById('yt-dl-title').textContent = '📦 批量處理 0/'+_ytBatchTotal;
+  document.getElementById('yt-prog-bar').style.width = '0%';
+  document.getElementById('yt-prog-text').textContent = '0%';
+  document.getElementById('yt-prog-msg').textContent = '準備中...';
+  document.getElementById('yt-prog-msg').style.color = 'var(--txt2)';
+  progCard.scrollIntoView({behavior:'smooth', block:'center'});
+
+  _ytBatchNext(quality, keyword);
+}
+
+function _ytBatchNext(quality, keyword){
+  if(_ytBatchDone >= _ytBatchTotal){
+    document.getElementById('yt-dl-title').textContent = '📦 批量處理完成';
+    document.getElementById('yt-prog-bar').style.width = '100%';
+    document.getElementById('yt-prog-text').textContent = '100%';
+    document.getElementById('yt-prog-msg').innerHTML = '✅ 全部 '+_ytBatchTotal+' 部處理完成！';
+    ytLoadDownloads();
+    return;
+  }
+  const v = _ytBatchQueue[_ytBatchDone];
+  const num = (_ytBatchDone+1)+'/'+_ytBatchTotal;
+  document.getElementById('yt-dl-title').textContent = '📦 批量處理 '+num+'：'+v.title;
+
+  if(_ytBatchMode === 'extract'){
+    _ytBatchDownloadAndExtract(v, quality, keyword);
+  } else {
+    _ytBatchDownloadOne(v, quality, keyword);
+  }
+}
+
+async function _ytBatchDownloadOne(v, quality, keyword){
+  try{
+    const r = await fetch('/api/yt/download',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:v.url, title:v.title, quality, keyword})
+    });
+    const d = await r.json();
+    if(d.error){
+      document.getElementById('yt-prog-msg').textContent = '⚠️ '+v.title+': '+d.error;
+      _ytBatchDone++;
+      _ytBatchUpdateBar();
+      _ytBatchNext(quality, keyword);
+      return;
+    }
+    _ytBatchListenDL(d.task_id, quality, keyword, false);
+  }catch(e){
+    _ytBatchDone++;
+    _ytBatchUpdateBar();
+    _ytBatchNext(quality, keyword);
+  }
+}
+
+function _ytBatchListenDL(taskId, quality, keyword, chainExtract){
+  if(ytES) ytES.close();
+  ytES = new EventSource('/api/yt/progress/'+taskId);
+  ytES.onmessage = (e)=>{
+    const d = JSON.parse(e.data);
+    switch(d.type){
+      case 'progress':
+        const base = (_ytBatchDone/_ytBatchTotal)*100;
+        const slice = chainExtract ? 50 : 100;
+        const pct = base + (d.percent||0)/100 * (slice/_ytBatchTotal);
+        document.getElementById('yt-prog-bar').style.width = Math.round(pct)+'%';
+        document.getElementById('yt-prog-text').textContent = Math.round(pct)+'%';
+        document.getElementById('yt-prog-msg').textContent = (chainExtract?'下載：':'')+(d.message||'');
+        break;
+      case 'done':
+        ytES.close(); ytES=null;
+        if(chainExtract){
+          document.getElementById('yt-prog-msg').textContent = '下載完成，開始擷取...';
+          _ytBatchExtractOne(d.rel_path, keyword, quality);
+        } else {
+          _ytBatchDone++;
+          _ytBatchUpdateBar();
+          ytLoadDownloads();
+          _ytBatchNext(quality, keyword);
+        }
+        break;
+      case 'error':
+        ytES.close(); ytES=null;
+        document.getElementById('yt-prog-msg').textContent = '⚠️ 下載失敗：'+d.message;
+        _ytBatchDone++;
+        _ytBatchUpdateBar();
+        _ytBatchNext(quality, keyword);
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  ytES.onerror = ()=>{
+    ytES.close(); ytES=null;
+    _ytBatchDone++;
+    _ytBatchUpdateBar();
+    _ytBatchNext(quality, keyword);
+  };
+}
+
+async function _ytBatchDownloadAndExtract(v, quality, keyword){
+  try{
+    const r = await fetch('/api/yt/download',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:v.url, title:v.title, quality, keyword})
+    });
+    const d = await r.json();
+    if(d.error){
+      document.getElementById('yt-prog-msg').textContent = '⚠️ '+v.title+': '+d.error;
+      _ytBatchDone++;
+      _ytBatchUpdateBar();
+      _ytBatchNext(quality, keyword);
+      return;
+    }
+    _ytBatchListenDL(d.task_id, quality, keyword, true);
+  }catch(e){
+    _ytBatchDone++;
+    _ytBatchUpdateBar();
+    _ytBatchNext(quality, keyword);
+  }
+}
+
+// ── 人物對應選擇 ──
+let _mappingResolve = null;  // Promise resolve callback
+let _mappingKeyword = '';
+
+function _showMappingModal(keyword, folders, message){
+  return new Promise((resolve)=>{
+    _mappingResolve = resolve;
+    _mappingKeyword = keyword;
+    document.getElementById('mapping-msg').textContent = message || '找不到「'+keyword+'」的照片資料夾';
+    const sel = document.getElementById('mapping-select');
+    sel.innerHTML = '';
+    // 把最可能的放前面（名稱包含關鍵字的部分）
+    const kw = keyword.toLowerCase();
+    const sorted = [...folders].sort((a,b)=>{
+      const aMatch = kw.includes(a.toLowerCase()) || a.toLowerCase().includes(kw.split(' ')[kw.split(' ').length-1]);
+      const bMatch = kw.includes(b.toLowerCase()) || b.toLowerCase().includes(kw.split(' ')[kw.split(' ').length-1]);
+      if(aMatch && !bMatch) return -1;
+      if(!aMatch && bMatch) return 1;
+      return a.localeCompare(b);
+    });
+    sorted.forEach(f=>{
+      const opt = document.createElement('option');
+      opt.value = f; opt.textContent = f;
+      sel.appendChild(opt);
+    });
+    document.getElementById('yt-mapping-modal').style.display = 'flex';
+  });
+}
+
+function ytMappingCancel(){
+  document.getElementById('yt-mapping-modal').style.display = 'none';
+  if(_mappingResolve){ _mappingResolve(null); _mappingResolve = null; }
+}
+
+async function ytMappingConfirm(){
+  const chosen = document.getElementById('mapping-select').value;
+  document.getElementById('yt-mapping-modal').style.display = 'none';
+  if(!chosen){ if(_mappingResolve){ _mappingResolve(null); _mappingResolve=null; } return; }
+  // 加入別名
+  try{
+    await fetch('/api/alias',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({alias:_mappingKeyword, canonical:chosen})
+    });
+  }catch(e){}
+  if(_mappingResolve){ _mappingResolve(chosen); _mappingResolve=null; }
+}
+
+async function _ytBatchExtractOne(relPath, keyword, quality){
+  try{
+    const r = await fetch('/api/yt/extract',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:relPath, person:keyword})
+    });
+    const d = await r.json();
+    // 找不到照片資料夾 → 彈出選擇對話框
+    if(d.need_mapping){
+      const chosen = await _showMappingModal(d.keyword, d.available_folders, d.message);
+      if(!chosen){
+        document.getElementById('yt-prog-msg').textContent = '⏭️ 已跳過擷取';
+        _ytBatchDone++;
+        _ytBatchUpdateBar();
+        _ytBatchNext(quality, keyword);
+        return;
+      }
+      // 用選擇的人物重新擷取
+      const r2 = await fetch('/api/yt/extract',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({filename:relPath, person:chosen})
+      });
+      const d2 = await r2.json();
+      if(d2.error){
+        document.getElementById('yt-prog-msg').textContent = '⚠️ 擷取失敗：'+d2.error;
+        _ytBatchDone++;
+        _ytBatchUpdateBar();
+        _ytBatchNext(quality, keyword);
+        return;
+      }
+      _ytListenExtract(d2.task_id, quality, keyword);
+      return;
+    }
+    if(d.error){
+      document.getElementById('yt-prog-msg').textContent = '⚠️ 擷取失敗：'+d.error;
+      _ytBatchDone++;
+      _ytBatchUpdateBar();
+      _ytBatchNext(quality, keyword);
+      return;
+    }
+    _ytListenExtract(d.task_id, quality, keyword);
+  }catch(e){
+    _ytBatchDone++;
+    _ytBatchUpdateBar();
+    _ytBatchNext(quality, keyword);
+  }
+}
+
+function _ytListenExtract(taskId, quality, keyword){
+  const es = new EventSource('/api/yt/extract-progress/'+taskId);
+  es.onmessage = (ev)=>{
+    const dd = JSON.parse(ev.data);
+    switch(dd.type){
+      case 'progress':
+        const base = (_ytBatchDone/_ytBatchTotal)*100;
+        const pct = base + (50 + (dd.percent||0)/2) / _ytBatchTotal;
+        document.getElementById('yt-prog-bar').style.width = Math.round(pct)+'%';
+        document.getElementById('yt-prog-text').textContent = Math.round(pct)+'%';
+        document.getElementById('yt-prog-msg').textContent = '擷取：'+(dd.message||'');
+        break;
+      case 'done':
+        es.close();
+        _ytBatchDone++;
+        _ytBatchUpdateBar();
+        ytLoadDownloads();
+        _ytBatchNext(quality, keyword);
+        break;
+      case 'error':
+        es.close();
+        document.getElementById('yt-prog-msg').textContent = '⚠️ 擷取失敗：'+dd.message;
+        _ytBatchDone++;
+        _ytBatchUpdateBar();
+        _ytBatchNext(quality, keyword);
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  es.onerror = ()=>{
+    es.close();
+    _ytBatchDone++;
+    _ytBatchUpdateBar();
+    _ytBatchNext(quality, keyword);
+  };
+}
+
+function _ytBatchUpdateBar(){
+  const pct = Math.round((_ytBatchDone/_ytBatchTotal)*100);
+  document.getElementById('yt-prog-bar').style.width = pct+'%';
+  document.getElementById('yt-prog-text').textContent = pct+'%';
 }
 
 async function ytDownload(url, title, quality, keyword){
@@ -3687,6 +4886,140 @@ function ytListenSSE(taskId){
   ytES.onerror = ()=>{ ytES.close(); ytES=null; };
 }
 
+// ═══════════ 下載 + 自動擷取 ═══════════
+async function ytDownloadAndExtract(url, title, quality, keyword){
+  const progCard = document.getElementById('yt-progress-card');
+  progCard.style.display = '';
+  document.getElementById('yt-dl-title').textContent = '📥 ' + title;
+  document.getElementById('yt-prog-bar').style.width = '0%';
+  document.getElementById('yt-prog-text').textContent = '0%';
+  document.getElementById('yt-prog-msg').textContent = '步驟 1/2：下載中...';
+  document.getElementById('yt-prog-msg').style.color = 'var(--txt2)';
+  progCard.scrollIntoView({behavior:'smooth', block:'center'});
+
+  try{
+    const r = await fetch('/api/yt/download',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url, title, quality, keyword})
+    });
+    const d = await r.json();
+    if(d.error){
+      document.getElementById('yt-prog-msg').textContent = '錯誤: '+d.error;
+      document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+      return;
+    }
+    // Listen download SSE, then chain extract on done
+    _chainDownloadThenExtract(d.task_id, keyword);
+  }catch(e){
+    document.getElementById('yt-prog-msg').textContent = '連線失敗: '+e;
+    document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+  }
+}
+
+function _chainDownloadThenExtract(taskId, person){
+  if(ytES) ytES.close();
+  ytES = new EventSource('/api/yt/progress/'+taskId);
+  ytES.onmessage = (e)=>{
+    const d = JSON.parse(e.data);
+    switch(d.type){
+      case 'progress':
+        const pct = Math.round((d.percent||0) * 0.5);
+        document.getElementById('yt-prog-bar').style.width = pct+'%';
+        document.getElementById('yt-prog-text').textContent = pct+'%';
+        document.getElementById('yt-prog-msg').textContent = '步驟 1/2 下載：'+(d.message||'');
+        break;
+      case 'done':
+        ytES.close(); ytES=null;
+        document.getElementById('yt-prog-bar').style.width = '50%';
+        document.getElementById('yt-prog-text').textContent = '50%';
+        document.getElementById('yt-prog-msg').textContent = '✅ 下載完成，開始擷取人物...';
+        document.getElementById('yt-dl-title').textContent = '🎯 擷取中：' + (d.filename||'');
+        ytLoadDownloads();
+        // Chain: start extract
+        _startExtractAfterDownload(d.rel_path, person);
+        break;
+      case 'error':
+        ytES.close(); ytES=null;
+        document.getElementById('yt-prog-msg').textContent = '❌ 下載失敗：'+d.message;
+        document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  ytES.onerror = ()=>{ ytES.close(); ytES=null; };
+}
+
+async function _startExtractAfterDownload(relPath, person){
+  try{
+    const r = await fetch('/api/yt/extract',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename: relPath, person: person})
+    });
+    const d = await r.json();
+    // 找不到照片資料夾 → 彈出選擇對話框
+    if(d.need_mapping){
+      const chosen = await _showMappingModal(d.keyword, d.available_folders, d.message);
+      if(!chosen){
+        document.getElementById('yt-prog-msg').textContent = '⏭️ 已跳過擷取';
+        return;
+      }
+      const r2 = await fetch('/api/yt/extract',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({filename: relPath, person: chosen})
+      });
+      const d2 = await r2.json();
+      if(d2.error){
+        document.getElementById('yt-prog-msg').textContent = '⚠️ 擷取失敗：'+d2.error;
+        document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+        return;
+      }
+      _chainExtractSSE(d2.task_id);
+      return;
+    }
+    if(d.error){
+      document.getElementById('yt-prog-msg').textContent = '⚠️ 擷取失敗：'+d.error;
+      document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+      return;
+    }
+    _chainExtractSSE(d.task_id);
+  }catch(e){
+    document.getElementById('yt-prog-msg').textContent = '擷取連線失敗: '+e;
+    document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+  }
+}
+
+function _chainExtractSSE(taskId){
+  const es = new EventSource('/api/yt/extract-progress/'+taskId);
+  es.onmessage = (e)=>{
+    const d = JSON.parse(e.data);
+    switch(d.type){
+      case 'progress':
+        const pct = 50 + Math.round((d.percent||0) * 0.5);
+        document.getElementById('yt-prog-bar').style.width = pct+'%';
+        document.getElementById('yt-prog-text').textContent = pct+'%';
+        document.getElementById('yt-prog-msg').textContent = '步驟 2/2 擷取：'+(d.message||'');
+        break;
+      case 'done':
+        es.close();
+        document.getElementById('yt-prog-bar').style.width = '100%';
+        document.getElementById('yt-prog-text').textContent = '100%';
+        document.getElementById('yt-prog-msg').innerHTML =
+          '✅ 全部完成！找到 '+d.segments+' 個片段（'+d.duration+'秒）'
+          +' <a href="'+d.file_url+'" target="_blank" style="color:var(--pri)">'+d.filename+'</a>'
+          +' ('+d.file_size_mb+'MB)';
+        ytLoadDownloads();
+        break;
+      case 'error':
+        es.close();
+        document.getElementById('yt-prog-msg').textContent = '❌ 擷取失敗：'+d.message;
+        document.getElementById('yt-prog-msg').style.color = 'var(--err)';
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  es.onerror = ()=>{ es.close(); };
+}
+
 async function ytLoadDownloads(){
   const el = document.getElementById('yt-downloads');
   try{
@@ -3709,10 +5042,46 @@ async function ytLoadDownloads(){
         +'<span style="color:var(--txt2);white-space:nowrap">'+f.size_mb+'MB · '+f.created+'</span>'
         +'<a href="'+f.url+'" target="_blank">▶ 播放</a>'
         +'<a href="'+f.url+'" download>⬇</a>'
+        +(isAudio ? '' : '<button class="btn" style="font-size:.75em;padding:3px 10px" onclick="ytRotateVideo(\''+relPath+'\',this)">🔄 旋轉</button>')
         +(isAudio || f.category==='extracts' ? '' : '<button class="btn" style="font-size:.75em;padding:3px 10px" onclick="showExtract(\''+relPath+'\')">🎯 擷取人物</button>');
       el.appendChild(div);
     });
+    hlLoadPersons();
   }catch(e){el.innerHTML='<span style="color:var(--err)">載入失敗</span>';}
+}
+
+// ═══════════ 影片旋轉 ═══════════════════════════════════
+async function ytRotateVideo(relPath, btn){
+  const choice = prompt('選擇旋轉方向：\n1) 順時針 90°\n2) 逆時針 90°\n3) 180°\n\n請輸入 1, 2, 或 3');
+  if(!choice) return;
+  const idx = parseInt(choice);
+  if(idx < 1 || idx > 3){ alert('無效的選擇'); return; }
+  const angle = [90, 270, 180][idx-1];
+  const labels = ['順時針 90°','逆時針 90°','180°'];
+  if(!confirm('確定要將影片旋轉 '+labels[idx-1]+'？\n（會覆蓋原始檔案，可能需要數分鐘）')) return;
+
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '⏳ 旋轉中...';
+
+  try{
+    const r = await fetch('/api/yt/rotate',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rel_path:relPath, angle:angle})
+    });
+    const d = await r.json();
+    if(d.error){
+      alert('旋轉失敗: '+d.error);
+    } else {
+      alert('✅ 旋轉完成！('+d.size_mb+'MB)');
+      ytLoadDownloads();
+    }
+  }catch(e){
+    alert('旋轉失敗: '+e);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
 }
 
 // ═══════════ 人臉辨識影片擷取 ═══════════════════════════
@@ -3832,17 +5201,72 @@ async function hlLoadPersons(){
   }catch(e){}
 }
 
-function hlLoadPersonInfo(){
+async function hlLoadPersonInfo(){
   const sel = document.getElementById('hl-person');
   const info = document.getElementById('hl-person-info');
-  if(sel.value){
-    info.textContent = '將從 '+sel.selectedOptions[0].textContent+' 的擷取影片製作精華';
+  const listDiv = document.getElementById('hl-video-list');
+  const container = document.getElementById('hl-videos');
+  if(!sel.value){
+    listDiv.style.display = 'none';
+    info.textContent = '';
+    return;
   }
+  // 載入該人物的影片清單
+  try{
+    const r = await fetch('/api/yt/highlight-videos/'+encodeURIComponent(sel.value));
+    const videos = await r.json();
+    if(!videos.length){
+      listDiv.style.display = 'none';
+      info.textContent = '此人物沒有擷取影片';
+      return;
+    }
+    container.innerHTML = '';
+    videos.forEach((v,i)=>{
+      const durStr = v.duration ? (v.duration+'秒') : '';
+      const div = document.createElement('div');
+      div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg);border-radius:6px;font-size:.82em';
+      div.innerHTML = '<input type="checkbox" class="hl-vid-cb" data-filename="'+v.filename+'" checked style="cursor:pointer" onchange="_hlUpdateInfo()">'
+        +'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.filename+'">'+v.filename+'</span>'
+        +'<span style="color:var(--txt2);white-space:nowrap">'+v.size_mb+'MB'+(durStr?' · '+durStr:'')+'</span>'
+        +'<a href="'+v.url+'" target="_blank" style="color:var(--pri);text-decoration:none;font-size:.9em">▶</a>';
+      container.appendChild(div);
+    });
+    listDiv.style.display = '';
+    document.getElementById('hl-select-all').checked = true;
+    _hlUpdateInfo();
+  }catch(e){
+    info.textContent = '載入影片清單失敗';
+    listDiv.style.display = 'none';
+  }
+}
+
+function hlToggleAllVideos(on){
+  document.querySelectorAll('.hl-vid-cb').forEach(cb=>{ cb.checked = on; });
+  _hlUpdateInfo();
+}
+
+function _hlUpdateInfo(){
+  const total = document.querySelectorAll('.hl-vid-cb').length;
+  const checked = document.querySelectorAll('.hl-vid-cb:checked').length;
+  const sel = document.getElementById('hl-person');
+  const info = document.getElementById('hl-person-info');
+  info.textContent = '將從 '+sel.value+' 的 '+checked+'/'+total+' 部擷取影片製作精華';
+  document.getElementById('hl-select-all').checked = (checked === total);
 }
 
 async function ytHighlight(){
   const person = document.getElementById('hl-person').value;
   if(!person) return alert('請選擇人物');
+
+  // 收集已勾選的影片
+  const checkedCbs = document.querySelectorAll('.hl-vid-cb:checked');
+  const allCbs = document.querySelectorAll('.hl-vid-cb');
+  if(allCbs.length > 0 && checkedCbs.length === 0){
+    return alert('請至少選擇一部影片');
+  }
+  const selectedVideos = allCbs.length > 0 && checkedCbs.length < allCbs.length
+    ? Array.from(checkedCbs).map(cb => cb.dataset.filename)
+    : null;  // null = 用全部
 
   const opts = {
     person,
@@ -3853,7 +5277,9 @@ async function ytHighlight(){
     transition: document.getElementById('hl-transition').value,
     transition_dur: parseFloat(document.getElementById('hl-xfade-val').value),
     resolution: document.getElementById('hl-resolution').value,
+    audio_mode: document.getElementById('hl-audio-mode').value,
   };
+  if(selectedVideos) opts.videos = selectedVideos;
 
   document.getElementById('btn-highlight').disabled = true;
   document.getElementById('hl-prog-wrap').style.display = '';
@@ -3926,6 +5352,178 @@ function hlListenSSE(taskId){
     if(tab === 'yt') hlLoadPersons();
   };
 })();
+
+// ═══════════ 一鍵影片生成 ═══════════════════════════════
+let avES = null;
+
+function _avGetResolution(){
+  const orient = document.getElementById('av-orientation').value;
+  const res = document.getElementById('av-resolution').value;
+  return orient === 'vertical' ? res+'p_v' : res+'p';
+}
+
+async function autoVideoStart(){
+  const person = document.getElementById('av-person').value.trim();
+  if(!person) return alert('請輸入人物名稱');
+
+  const keyword = document.getElementById('av-keyword').value.trim();
+  const opts = {
+    person: person,
+    search_keyword: keyword || person,
+    platform: document.getElementById('av-platform').value,
+    max_videos: parseInt(document.getElementById('av-max-videos').value),
+    strategy: document.getElementById('av-strategy').value,
+    clip_duration: parseFloat(document.getElementById('av-clip-dur').value),
+    total_duration: parseFloat(document.getElementById('av-total-dur').value),
+    resolution: _avGetResolution(),
+    transition: document.getElementById('av-transition').value,
+    transition_dur: 0.5,
+    audio_mode: document.getElementById('av-audio').value,
+  };
+
+  document.getElementById('btn-auto-video').disabled = true;
+  document.getElementById('av-progress-card').style.display = '';
+  document.getElementById('av-result-card').style.display = 'none';
+  document.getElementById('av-prog-bar').style.width = '0%';
+  document.getElementById('av-prog-text').textContent = '0%';
+  document.getElementById('av-prog-msg').textContent = '啟動中...';
+  document.getElementById('av-prog-msg').style.color = 'var(--txt2)';
+  document.getElementById('av-log').innerHTML = '';
+  document.getElementById('av-phase-title').textContent = '⏳ 處理中...';
+  document.getElementById('av-progress-card').scrollIntoView({behavior:'smooth', block:'center'});
+
+  try{
+    const r = await fetch('/api/auto-video',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(opts)
+    });
+    const d = await r.json();
+    // 找不到照片資料夾 → 彈出選擇對話框
+    if(d.need_mapping){
+      const chosen = await _showMappingModal(d.keyword, d.available_folders, d.message);
+      if(!chosen){
+        document.getElementById('av-prog-msg').textContent = '⏭️ 已取消';
+        document.getElementById('btn-auto-video').disabled = false;
+        return;
+      }
+      opts.person = chosen;
+      const r2 = await fetch('/api/auto-video',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(opts)
+      });
+      const d2 = await r2.json();
+      if(d2.error){
+        document.getElementById('av-prog-msg').textContent = '❌ '+d2.error;
+        document.getElementById('av-prog-msg').style.color = 'var(--err)';
+        document.getElementById('btn-auto-video').disabled = false;
+        return;
+      }
+      _avListenSSE(d2.task_id);
+      return;
+    }
+    if(d.error){
+      document.getElementById('av-prog-msg').textContent = '❌ '+d.error;
+      document.getElementById('av-prog-msg').style.color = 'var(--err)';
+      document.getElementById('btn-auto-video').disabled = false;
+      return;
+    }
+    _avListenSSE(d.task_id);
+  }catch(e){
+    document.getElementById('av-prog-msg').textContent = '連線失敗: '+e;
+    document.getElementById('av-prog-msg').style.color = 'var(--err)';
+    document.getElementById('btn-auto-video').disabled = false;
+  }
+}
+
+const _avPhaseLabels = {
+  search: '🔍 搜尋中',
+  download: '📥 下載中',
+  extract: '🎯 擷取中',
+  highlight: '🎬 剪輯中',
+};
+
+function _avListenSSE(taskId){
+  if(avES) avES.close();
+  const logEl = document.getElementById('av-log');
+  let lastPhase = '';
+  avES = new EventSource('/api/auto-video/progress/'+taskId);
+  avES.onmessage = (e)=>{
+    const d = JSON.parse(e.data);
+    switch(d.type){
+      case 'progress':
+        const pct = Math.round(d.percent||0);
+        document.getElementById('av-prog-bar').style.width = pct+'%';
+        document.getElementById('av-prog-text').textContent = pct+'%';
+        document.getElementById('av-prog-msg').textContent = d.message||'';
+        // 更新標題
+        if(d.phase && d.phase !== lastPhase){
+          lastPhase = d.phase;
+          document.getElementById('av-phase-title').textContent =
+            (_avPhaseLabels[d.phase]||'⏳ 處理中') + '...';
+        }
+        // 加入日誌
+        if(d.message){
+          const line = document.createElement('div');
+          const ts = new Date().toTimeString().slice(0,8);
+          line.style.color = d.message.startsWith('⚠️') ? 'var(--warn)' :
+                             d.message.startsWith('❌') ? 'var(--err)' :
+                             d.message.startsWith('✅') ? 'var(--ok)' : 'var(--txt2)';
+          line.textContent = '['+ts+'] '+d.message;
+          logEl.appendChild(line);
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+        break;
+      case 'done':
+        avES.close(); avES=null;
+        document.getElementById('av-prog-bar').style.width = '100%';
+        document.getElementById('av-prog-text').textContent = '100%';
+        document.getElementById('av-phase-title').textContent = '🎉 完成！';
+        document.getElementById('av-prog-msg').innerHTML =
+          '✅ 影片生成完成！ <a href="'+d.file_url+'" target="_blank" style="color:var(--pri);font-weight:600">'+d.filename+'</a>'
+          +' ('+d.file_size_mb+'MB)';
+        // 顯示結果卡
+        document.getElementById('av-result-card').style.display = '';
+        document.getElementById('av-result-info').innerHTML =
+          '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:.88em">'
+          +'<span>📥 下載 <b>'+d.downloaded+'</b> 部</span>'
+          +'<span>🎯 擷取 <b>'+d.extracted+'</b> 部</span>'
+          +'<span>✂️ <b>'+d.clips_count+'</b> 個片段</span>'
+          +'<span>⏱️ <b>'+d.duration+'</b> 秒</span>'
+          +'<span>📦 <b>'+d.file_size_mb+'</b> MB</span>'
+          +'</div>';
+        document.getElementById('av-result-video').innerHTML =
+          '<video src="'+d.file_url+'" controls style="max-width:100%;max-height:480px;border-radius:12px;margin-top:10px"></video>'
+          +'<div style="margin-top:8px"><a href="'+d.file_url+'" download class="btn btn-pri" style="font-size:.88em">⬇️ 下載影片</a></div>';
+        document.getElementById('av-result-card').scrollIntoView({behavior:'smooth', block:'center'});
+        document.getElementById('btn-auto-video').disabled = false;
+        // 加入日誌
+        const line = document.createElement('div');
+        line.style.color = 'var(--ok)';
+        line.style.fontWeight = '600';
+        line.textContent = '['+new Date().toTimeString().slice(0,8)+'] ✅ 完成！'+d.filename;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+        break;
+      case 'error':
+        avES.close(); avES=null;
+        document.getElementById('av-phase-title').textContent = '❌ 失敗';
+        document.getElementById('av-prog-msg').textContent = '❌ '+d.message;
+        document.getElementById('av-prog-msg').style.color = 'var(--err)';
+        document.getElementById('btn-auto-video').disabled = false;
+        const eline = document.createElement('div');
+        eline.style.color = 'var(--err)';
+        eline.textContent = '['+new Date().toTimeString().slice(0,8)+'] ❌ '+d.message;
+        logEl.appendChild(eline);
+        break;
+      case 'heartbeat': break;
+    }
+  };
+  avES.onerror = ()=>{
+    avES.close(); avES=null;
+    document.getElementById('btn-auto-video').disabled = false;
+    document.getElementById('av-phase-title').textContent = '⚠️ 連線中斷';
+  };
+}
 </script>
 </body>
 </html>

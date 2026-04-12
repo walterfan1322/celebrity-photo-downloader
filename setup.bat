@@ -24,11 +24,11 @@ if errorlevel 1 (
 
 echo.
 echo [2/2] 建立資料夾...
-if not exist "D:\CelebrityPhotos" mkdir "D:\CelebrityPhotos"
+if not exist "%~dp0Photos" mkdir "%~dp0Photos"
 if not exist "%~dp0data" mkdir "%~dp0data"
 
 echo.
 echo ============================================
-echo   安裝完成！請執行 run.bat 啟動程式
+echo   安裝完成！請執行 run_web.bat 啟動程式
 echo ============================================
 pause

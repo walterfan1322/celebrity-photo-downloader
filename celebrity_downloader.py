@@ -42,7 +42,7 @@ except ImportError:
     HAS_IMAGEHASH = False
 
 # ── 設定 ──────────────────────────────────────────────────
-DEFAULT_ROOT = r"D:\CelebrityPhotos"
+DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Photos")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "history.db")

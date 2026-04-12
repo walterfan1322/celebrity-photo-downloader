@@ -3,9 +3,13 @@
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
 
 # Data & logs
 *.db
@@ -13,6 +17,8 @@ __pycache__/
 *.log
 *.bak
 data/
+app_stdout.log
+app_stderr.log
 
 # Media folders (user content)
 Photos/
@@ -25,8 +31,22 @@ YouTube/
 models/
 *.onnx
 
+# Chrome profile
+chrome_profile/
+
 # Deployment (may contain credentials)
 deploy.bat
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # Installers
 setup/ts-setup.msi

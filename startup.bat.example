@@ -1,0 +1,29 @@
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+
+:: ============================================
+::   Auto-start script (example)
+::   1. Launches Chrome with debug port for TikTok search
+::   2. Runs web_app.py with watchdog restart
+::
+::   To auto-start on login:
+::   schtasks /create /tn "MediaDownloader" /tr "path\to\startup.bat" /sc onlogon /rl highest
+:: ============================================
+
+:: 1. Start Chrome (debug port) if not running
+netstat -an | findstr "127.0.0.1:9222" | findstr "LISTENING" >nul 2>&1
+if %errorlevel% neq 0 (
+    start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" ^
+        --remote-debugging-port=9222 ^
+        --user-data-dir="%~dp0chrome_profile" ^
+        --no-first-run --disable-default-apps --disable-extensions ^
+        --window-size=1280,900 "about:blank"
+    timeout /t 3 /nobreak >nul
+)
+
+:: 2. Watchdog loop for web_app.py
+:loop
+python web_app.py >> app_stdout.log 2>> app_stderr.log
+timeout /t 5 /nobreak >nul
+goto loop
