@@ -1551,6 +1551,13 @@ def _tiktok_search(keyword, max_results=10):
         search_url = f"https://www.tiktok.com/search/video?q={quote(keyword)}"
         page.get(search_url)
         _time.sleep(7)
+        # 向下滾動載入更多結果（避免每次都拿到相同的前幾筆）
+        for _scroll_i in range(3):
+            try:
+                page.scroll.down(800)
+                _time.sleep(1.5)
+            except Exception:
+                break
         # 取得影片描述 / 觀看數元素
         desc_els = page.eles('css:[data-e2e="search-card-desc"]')
         view_els = page.eles('css:[data-e2e="video-views"]')
@@ -2451,27 +2458,30 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
 
     temp_dir = tempfile.mkdtemp()
     try:
-        # Phase 1: 擷取每個片段並統一解析度
+        # Phase 1: 擷取每個片段並統一解析度（精確裁切到 clip_duration 秒）
         seg_files = []
         for i, clip in enumerate(clips):
             seg_path = os.path.join(temp_dir, f"clip_{i:04d}.mp4")
-            start = max(0, clip["time"] - 0.5)
+            start = max(0, clip["time"] - 0.3)
             cmd = [
                 ffmpeg, "-y",
                 "-ss", f"{start:.2f}",
                 "-i", clip["video"],
-                "-t", f"{clip_duration + 0.5:.2f}",
+                "-t", f"{clip_duration:.2f}",
                 "-vf", f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
-                       f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black",
+                       f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black,"
+                       f"setpts=PTS-STARTPTS",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             ]
             if audio_mode == "mute":
                 cmd += ["-an"]
             else:
-                cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
+                cmd += ["-af", "asetpts=PTS-STARTPTS",
+                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
             cmd += [
                 "-r", "30",
                 "-shortest",
+                "-fflags", "+genpts",
                 seg_path,
             ]
             subprocess.run(cmd, capture_output=True, timeout=120)
@@ -2793,23 +2803,9 @@ def api_auto_video():
     resolution = data.get("resolution", "720p_v")  # 預設直式
     audio_mode = data.get("audio_mode", "original")
     platform = data.get("platform", "tiktok")
+    video_type = data.get("video_type", "all")
 
-    # 先確認照片資料夾存在
     resolved_person = resolve_celebrity(person)
-    photo_dir = os.path.join(DOWNLOAD_ROOT, resolved_person)
-    if not os.path.isdir(photo_dir):
-        available = sorted([
-            d for d in os.listdir(DOWNLOAD_ROOT)
-            if os.path.isdir(os.path.join(DOWNLOAD_ROOT, d))
-               and not d.startswith(".")
-        ])
-        return jsonify({
-            "need_mapping": True,
-            "keyword": person,
-            "resolved": resolved_person,
-            "available_folders": available,
-            "message": f"找不到「{person}」的照片資料夾，請選擇要用哪個人物的照片進行辨識"
-        }), 200
 
     task_id = str(uuid.uuid4())[:8]
     q = Queue()
@@ -2821,7 +2817,8 @@ def api_auto_video():
             _auto_video_pipeline(
                 q, resolved_person, search_keyword, max_videos,
                 clip_duration, total_duration, strategy, transition,
-                transition_dur, resolution, audio_mode, platform
+                transition_dur, resolution, audio_mode, platform,
+                video_type=video_type
             )
         except Exception as e:
             import traceback
@@ -2836,23 +2833,51 @@ def api_auto_video():
 def _auto_video_pipeline(q, person, search_keyword, max_videos,
                           clip_duration, total_duration, strategy,
                           transition, transition_dur, resolution,
-                          audio_mode, platform):
+                          audio_mode, platform, video_type="all"):
     """完整 pipeline：搜尋 → 下載 → 擷取 → 精華剪輯"""
     import subprocess
+    import random as _random
+
+    # 影片類型關鍵字
+    VIDEO_TYPE_KW = {
+        "dance": "dance 舞蹈",
+        "fancam": "fancam 直拍",
+        "stage": "stage performance 舞台",
+        "cute": "cute moments 可愛",
+        "vlog": "vlog 日常",
+        "mv": "MV official",
+        "challenge": "challenge 挑戰",
+    }
+    actual_keyword = search_keyword
+    if video_type and video_type != "all" and video_type in VIDEO_TYPE_KW:
+        actual_keyword = f"{search_keyword} {VIDEO_TYPE_KW[video_type]}"
+
+    # 收集已有的影片 ID（避免重複下載）
+    person_folder = sanitize_name(person)
+    dl_dir = os.path.join(YT_DOWNLOADS, person_folder)
+    os.makedirs(dl_dir, exist_ok=True)
+    existing_ids = set()
+    if os.path.isdir(dl_dir):
+        for fname in os.listdir(dl_dir):
+            # 從檔名提取 video ID: "title [ID].mp4"
+            m = re.search(r'\[([A-Za-z0-9_-]+)\]\.', fname)
+            if m:
+                existing_ids.add(m.group(1))
 
     # ── Phase 1: 搜尋 (0-5%) ──
+    platform_label = "TikTok" if platform == "tiktok" else "YouTube"
     q.put({"type": "progress", "phase": "search", "percent": 0,
-           "message": f"🔍 搜尋 TikTok: {search_keyword}..."})
+           "message": f"🔍 搜尋 {platform_label}: {actual_keyword}..."})
 
     if platform == "tiktok":
-        if search_keyword.startswith("@"):
+        if actual_keyword.startswith("@"):
             # yt-dlp 抓使用者頁面
             try:
-                tiktok_url = f"https://www.tiktok.com/{search_keyword}"
+                tiktok_url = f"https://www.tiktok.com/{actual_keyword}"
                 ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(tiktok_url, download=False)
-                    entries = (info.get("entries") or [])[:max_videos]
+                    entries = (info.get("entries") or [])[:max_videos * 2]
                 search_results = [{
                     "url": e.get("url") or e.get("webpage_url") or f"https://www.tiktok.com/video/{e.get('id','')}",
                     "title": e.get("title", ""),
@@ -2863,13 +2888,14 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                 q.put({"type": "error", "message": f"TikTok 搜尋失敗: {e}"})
                 return
         else:
-            search_results = _tiktok_search(search_keyword, max_videos)
+            # 多抓一些，之後過濾重複 + 隨機挑選
+            search_results = _tiktok_search(actual_keyword, max_videos * 2)
     else:
         # YouTube 搜尋
         try:
             ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch{max_videos}:{search_keyword}", download=False)
+                info = ydl.extract_info(f"ytsearch{max_videos * 2}:{actual_keyword}", download=False)
                 entries = info.get("entries", [])
             search_results = [{
                 "url": e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id','')}",
@@ -2882,11 +2908,27 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
             return
 
     if not search_results:
-        q.put({"type": "error", "message": f"搜尋「{search_keyword}」沒有結果"})
+        q.put({"type": "error", "message": f"搜尋「{actual_keyword}」沒有結果"})
         return
 
+    # 過濾已下載過的影片
+    before_filter = len(search_results)
+    search_results = [v for v in search_results if v.get("id", "") not in existing_ids]
+    skipped = before_filter - len(search_results)
+    if skipped:
+        q.put({"type": "progress", "phase": "search", "percent": 3,
+               "message": f"⏭️ 跳過 {skipped} 個已下載過的影片"})
+
+    if not search_results:
+        q.put({"type": "error", "message": f"搜尋到的影片都已經下載過了，請換個關鍵字或類型"})
+        return
+
+    # 隨機打亂順序，取前 max_videos 個（確保每次結果不同）
+    _random.shuffle(search_results)
+    search_results = search_results[:max_videos]
+
     q.put({"type": "progress", "phase": "search", "percent": 5,
-           "message": f"✅ 找到 {len(search_results)} 個影片"})
+           "message": f"✅ 找到 {len(search_results)} 個新影片（跳過 {skipped} 個已有）"})
 
     # ── Phase 2: 下載 (5-35%) ──
     person_folder = sanitize_name(person)
@@ -2897,8 +2939,8 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
     for vi, v in enumerate(search_results):
         url = v.get("url", "")
         title = v.get("title", "") or f"video_{vi+1}"
-        pct_base = 5 + int(vi / len(search_results) * 30)
-        pct_end = 5 + int((vi + 1) / len(search_results) * 30)
+        pct_base = 5 + int(vi / len(search_results) * 25)
+        pct_end = 5 + int((vi + 1) / len(search_results) * 25)
 
         q.put({"type": "progress", "phase": "download", "percent": pct_base,
                "message": f"📥 下載 {vi+1}/{len(search_results)}: {title[:50]}..."})
@@ -2966,25 +3008,81 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         q.put({"type": "error", "message": "所有影片都下載失敗"})
         return
 
-    q.put({"type": "progress", "phase": "download", "percent": 35,
+    q.put({"type": "progress", "phase": "download", "percent": 30,
            "message": f"📥 下載完成：{len(downloaded_files)} 個影片"})
 
-    # ── Phase 3: 人臉擷取 (35-70%) ──
-    q.put({"type": "progress", "phase": "extract", "percent": 35,
+    # ── Phase 2.5: 自動下載照片（若不足）(30-38%) ──
+    photo_dir = os.path.join(DOWNLOAD_ROOT, person)
+    existing_photos = 0
+    if os.path.isdir(photo_dir):
+        img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+        existing_photos = sum(1 for f in os.listdir(photo_dir)
+                              if os.path.splitext(f)[1].lower() in img_exts)
+
+    MIN_PHOTOS_FOR_FACE = 10
+    if existing_photos < MIN_PHOTOS_FOR_FACE:
+        need = max(50, MIN_PHOTOS_FOR_FACE)
+        q.put({"type": "progress", "phase": "photos", "percent": 30,
+               "message": f"📸 {person} 照片不足（現有 {existing_photos} 張），從 Pinterest 下載 {need} 張..."})
+        try:
+            scraper = PinterestImageScraper()
+            search_kw = f"{person} photo"
+            def _pin_cb(msg):
+                q.put({"type": "progress", "phase": "photos", "percent": 32,
+                       "message": f"📸 {msg}"})
+            urls = scraper.search(search_kw, need, "", callback=_pin_cb)
+            if not urls:
+                # Pinterest 失敗，fallback 到 Bing
+                q.put({"type": "progress", "phase": "photos", "percent": 32,
+                       "message": f"📸 Pinterest 無結果，改用 Bing 搜尋..."})
+                bing_scraper = BingImageScraper()
+                urls = bing_scraper.search(search_kw, need, "", callback=_pin_cb)
+
+            if urls:
+                q.put({"type": "progress", "phase": "photos", "percent": 34,
+                       "message": f"📸 找到 {len(urls)} 個連結，下載中..."})
+                img_dl = ImageDownloader(db, person, "pinterest")
+                img_dl.download_all(
+                    urls, dedup_url=True, dedup_md5=True, dedup_phash=True,
+                    progress_cb=lambda cur, tot, stats: q.put({
+                        "type": "progress", "phase": "photos",
+                        "percent": 34 + int(cur / max(tot, 1) * 4),
+                        "message": f"📸 下載照片 {cur}/{tot}（成功 {stats['downloaded']}）"
+                    }),
+                )
+                q.put({"type": "progress", "phase": "photos", "percent": 38,
+                       "message": f"📸 照片下載完成（新增 {img_dl.stats['downloaded']} 張）"})
+                # 清除 embedding 快取，讓新照片生效
+                cache_path = os.path.join(photo_dir, ".face_embeddings.npy")
+                if os.path.isfile(cache_path):
+                    os.remove(cache_path)
+            else:
+                q.put({"type": "progress", "phase": "photos", "percent": 38,
+                       "message": f"⚠️ 無法從網路下載照片，嘗試用現有 {existing_photos} 張"})
+        except Exception as e:
+            logging.warning(f"auto-video photo download failed: {e}")
+            q.put({"type": "progress", "phase": "photos", "percent": 38,
+                   "message": f"⚠️ 照片下載失敗: {e}，嘗試用現有照片"})
+    else:
+        q.put({"type": "progress", "phase": "photos", "percent": 38,
+               "message": f"📸 已有 {existing_photos} 張照片，跳過下載"})
+
+    # ── Phase 3: 人臉擷取 (38-70%) ──
+    q.put({"type": "progress", "phase": "extract", "percent": 38,
            "message": f"🧑 建立 {person} 的臉部特徵..."})
 
     def emb_cb(pct):
-        p = 35 + int(pct * 5)
-        q.put({"type": "progress", "phase": "extract", "percent": min(p, 40),
+        p = 38 + int(pct * 4)
+        q.put({"type": "progress", "phase": "extract", "percent": min(p, 42),
                "message": f"建立臉部特徵 {int(pct*100)}%"})
 
     ref = _build_reference_embeddings(person, emb_cb)
     if ref is None or len(ref) < 3:
         q.put({"type": "error",
-               "message": f"{person} 的照片中找不到足夠的臉部特徵（至少需要 3 張）"})
+               "message": f"{person} 的照片中找不到足夠的臉部特徵（至少需要 3 張有臉的照片）"})
         return
 
-    q.put({"type": "progress", "phase": "extract", "percent": 40,
+    q.put({"type": "progress", "phase": "extract", "percent": 42,
            "message": f"✅ 使用 {len(ref)} 張臉部特徵，開始掃描影片..."})
 
     extract_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
@@ -2994,19 +3092,19 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
     for vi, dlf in enumerate(downloaded_files):
         video_path = dlf["full_path"]
         vname = dlf["filename"]
-        pct_base = 40 + int(vi / len(downloaded_files) * 25)
+        pct_base = 42 + int(vi / len(downloaded_files) * 23)
 
         q.put({"type": "progress", "phase": "extract", "percent": pct_base,
                "message": f"🔍 掃描 {vi+1}/{len(downloaded_files)}: {vname[:40]}..."})
 
         def scan_cb(pct, _vi=vi):
-            p = 40 + int((_vi + pct) / len(downloaded_files) * 25)
+            p = 42 + int((_vi + pct) / len(downloaded_files) * 23)
             q.put({"type": "progress", "phase": "extract", "percent": min(p, 65),
                    "message": f"掃描 {vname[:30]}... {int(pct*100)}%"})
 
         timestamps = _scan_video_for_person(video_path, ref, scan_cb)
         if not timestamps:
-            q.put({"type": "progress", "phase": "extract", "percent": pct_base + 5,
+            q.put({"type": "progress", "phase": "extract", "percent": pct_base + 4,
                    "message": f"⏭️ {vname[:40]} 中未偵測到 {person}"})
             continue
 
@@ -3021,7 +3119,7 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         if result and os.path.isfile(result):
             extracted_files.append(result)
             q.put({"type": "progress", "phase": "extract",
-                   "percent": 40 + int((vi + 1) / len(downloaded_files) * 25),
+                   "percent": 42 + int((vi + 1) / len(downloaded_files) * 23),
                    "message": f"✅ 擷取 {len(segments)} 段（{total_dur:.1f}秒）from {vname[:30]}"})
 
     if not extracted_files:
@@ -3093,6 +3191,28 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         })
     else:
         q.put({"type": "error", "message": "FFmpeg 合成失敗"})
+
+    # ── 清理：刪除下載的原始影片和中間擷取檔案 ──
+    cleaned = 0
+    # 刪除下載的原始影片
+    for dlf in downloaded_files:
+        try:
+            fp = dlf.get("full_path", "")
+            if fp and os.path.isfile(fp):
+                os.remove(fp)
+                cleaned += 1
+        except OSError:
+            pass
+    # 刪除中間擷取檔案（保留最終的 auto_*.mp4）
+    for ef in extracted_files:
+        try:
+            if os.path.isfile(ef) and os.path.basename(ef) != out_name:
+                os.remove(ef)
+                cleaned += 1
+        except OSError:
+            pass
+    if cleaned:
+        logging.info(f"auto-video cleanup: removed {cleaned} temp files")
 
 
 @app.route("/api/auto-video/progress/<task_id>")
@@ -3712,6 +3832,19 @@ justify-content:center;align-items:center;cursor:zoom-out}
     <select id="av-platform">
       <option value="tiktok" selected>TikTok</option>
       <option value="youtube">YouTube</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:.8em;color:var(--txt2)">影片類型</label>
+    <select id="av-video-type">
+      <option value="all" selected>全部</option>
+      <option value="dance">舞蹈</option>
+      <option value="fancam">直拍</option>
+      <option value="stage">舞台</option>
+      <option value="cute">可愛</option>
+      <option value="vlog">Vlog</option>
+      <option value="mv">MV</option>
+      <option value="challenge">挑戰</option>
     </select>
   </div>
   <div>
@@ -5379,6 +5512,7 @@ async function autoVideoStart(){
     transition: document.getElementById('av-transition').value,
     transition_dur: 0.5,
     audio_mode: document.getElementById('av-audio').value,
+    video_type: document.getElementById('av-video-type').value,
   };
 
   document.getElementById('btn-auto-video').disabled = true;
@@ -5398,29 +5532,6 @@ async function autoVideoStart(){
       body:JSON.stringify(opts)
     });
     const d = await r.json();
-    // 找不到照片資料夾 → 彈出選擇對話框
-    if(d.need_mapping){
-      const chosen = await _showMappingModal(d.keyword, d.available_folders, d.message);
-      if(!chosen){
-        document.getElementById('av-prog-msg').textContent = '⏭️ 已取消';
-        document.getElementById('btn-auto-video').disabled = false;
-        return;
-      }
-      opts.person = chosen;
-      const r2 = await fetch('/api/auto-video',{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(opts)
-      });
-      const d2 = await r2.json();
-      if(d2.error){
-        document.getElementById('av-prog-msg').textContent = '❌ '+d2.error;
-        document.getElementById('av-prog-msg').style.color = 'var(--err)';
-        document.getElementById('btn-auto-video').disabled = false;
-        return;
-      }
-      _avListenSSE(d2.task_id);
-      return;
-    }
     if(d.error){
       document.getElementById('av-prog-msg').textContent = '❌ '+d.error;
       document.getElementById('av-prog-msg').style.color = 'var(--err)';
@@ -5437,7 +5548,8 @@ async function autoVideoStart(){
 
 const _avPhaseLabels = {
   search: '🔍 搜尋中',
-  download: '📥 下載中',
+  download: '📥 下載影片中',
+  photos: '📸 下載照片中',
   extract: '🎯 擷取中',
   highlight: '🎬 剪輯中',
 };
