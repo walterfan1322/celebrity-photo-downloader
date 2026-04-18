@@ -31,14 +31,27 @@ All-in-one media downloader with celebrity photo bulk download, YouTube/TikTok v
 - **Alias system** - Map alternate names to canonical photo folders
 
 ### One-Click Video Generation
-- **Automated pipeline** - Input a person name, get a highlight reel:
-  1. Search TikTok/YouTube automatically
-  2. Download top videos
-  3. AI face recognition to extract person segments
-  4. Score highlights and compile final video
+- **Automated pipeline** - Pick a group + member from the dropdown, get a highlight reel:
+  1. Cross-platform search (TikTok + YouTube + YouTube Shorts merged)
+  2. Download top videos filtered by title/duration rules per video type (dance, stage, vlog, etc.)
+  3. AI face recognition to extract target-person segments (with negative-reference filtering)
+  4. Score highlights, filter out multi-member / subtitled / fan-edit clips, compile final video
+- **Hierarchical member picker** - Two-step dropdown: select group, then member auto-populates
 - **Vertical video support** - 9:16 format ready for TikTok/Reels/Shorts
 - **Highlight strategies** - Balanced / Close-up priority / Dynamic priority / Random
 - **Crossfade transitions** - Smooth transitions between clips
+- **Beat-aware cutting** - Snap clip boundaries to audio-quiet points for clean cuts
+- **Best-clip-first ordering** - Highest-scoring clip placed at t=0 (TikTok 3-second hook rule)
+- **Loop closure** - Last clip visually matches first via pHash for seamless looping
+
+### Clip Quality Filters
+- **Burned-in subtitle detection** - Rejects clips with persistent text bands (Canny edge density + cross-frame pixel stability on top/bottom regions)
+- **Per-clip multi-member detection** - For idol/group content, rejects clips where ≥50% of seconds contain a non-target face ≥ 50% the size of the target's face (keeps solo moments inside fan-edits)
+- **Fan-edit source detection** - Split-screen + metadata keyword + edge-stability heuristics to deprioritize edit/compilation sources
+- **Face-presence ratio gate** - Requires ≥33% of clip seconds to contain the target face
+- **pHash cross-clip dedup** - Hamming distance < 10 between mid-frames rejected as visually redundant
+- **Two-pass selection fallback** - Starts with `max_per_video=1` for source diversity, falls back to 2 then 3 if target length can't be reached
+- **Dynamic candidate pool** - `_extra_factor` over-selects candidates (2.5× in normal mode, 3× in preview) so filters have room to reject without starving the timeline
 
 ### TikTok-Style Video Maker
 - 6 modern video templates:
@@ -163,6 +176,17 @@ celebrity-photo-downloader/
 - **Remote**: paramiko (SSH tunneling)
 
 ## Changelog
+
+### v2.1 (2026-04-18)
+- **Burned-in subtitle filter** - Cross-frame edge-stability analysis rejects clips with persistent subtitle bands
+- **Per-clip multi-member detection** - Replaces over-aggressive per-source fan-edit rejection; keeps solo moments inside group compilations
+- **Hierarchical member dropdown** - Group → member two-step picker replaces free-text input (Fromis_9, IVE, Babymonster, IU, QWER, Illit, H2H, aespa, ITZY preset)
+- **Cross-platform unified search** - `platform=all` merges TikTok + YouTube + YouTube Shorts into one ranked list
+- **Expanded video-type title filter** - Positive/negative keyword lists + `require_positive` flag for dance/stage/vlog/etc.; drops reaction, tutorial, interview, compilation, edit, behind-the-scenes
+- **Two-pass selection fallback** - Retries with relaxed `max_per_video` caps (1 → 2 → 3) when candidate pool is too small
+- **Dynamic candidate pool** - `_extra_factor` over-selects 2.5×–3× so filters have headroom
+- **Beat-aware cut snapping** - Clip start times snap to ±1.5s audio-quiet points
+- **Loop closure** - Last clip mirrors first via pHash distance for seamless looping
 
 ### v2.0 (2026-04-12)
 - **TikTok keyword search** - DrissionPage + persistent Chrome scraping (bypasses CAPTCHA)
