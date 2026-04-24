@@ -59,12 +59,16 @@ else:
 
 # ── 設定（可透過環境變數覆寫） ─────────────────────────────
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DOWNLOAD_ROOT = os.environ.get("DOWNLOAD_ROOT", os.path.join(APP_DIR, "Photos"))
-VIDEO_ROOT = os.environ.get("VIDEO_ROOT", os.path.join(APP_DIR, "Videos"))
-YT_ROOT = os.environ.get("YT_ROOT", os.path.join(APP_DIR, "YouTube"))
+# APP_DATA_DIR：所有「runtime 資料」的基底路徑。
+# 預設等同 APP_DIR；若 source code 跟資料分開（例如 source 在 Project/，資料在 CelebrityPhotoDownloader/），
+# 就用環境變數 APP_DATA_DIR 覆寫即可。
+APP_DATA_DIR = os.environ.get("APP_DATA_DIR", APP_DIR)
+DOWNLOAD_ROOT = os.environ.get("DOWNLOAD_ROOT", os.path.join(APP_DATA_DIR, "Photos"))
+VIDEO_ROOT = os.environ.get("VIDEO_ROOT", os.path.join(APP_DATA_DIR, "Videos"))
+YT_ROOT = os.environ.get("YT_ROOT", os.path.join(APP_DATA_DIR, "YouTube"))
 YT_DOWNLOADS = os.path.join(YT_ROOT, "downloads")
 YT_EXTRACTS = os.path.join(YT_ROOT, "extracts")
-DATA_DIR = os.path.join(APP_DIR, "data")
+DATA_DIR = os.environ.get("APP_DATA_SUBDIR", os.path.join(APP_DATA_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "history.db")
 CELEB_GROUPS_FILE = os.path.join(DATA_DIR, "celeb_groups.json")
 
@@ -99,17 +103,64 @@ _DEFAULT_CELEB_GROUPS = {
     "magenta": "qwer",
     "hina": "qwer",
     "siyeon": "qwer",
-    "jiwoo": "nmixx",
+    "jiwoo": "nmixx",  # 同名於 H2H；裸名 fallback 預設 NMIXX
+    "jiwoo_h2h":   "h2h",
+    "jiwoo_nmixx": "nmixx",
     "haewon": "nmixx",
     "sullyoon": "nmixx",
     "bae": "nmixx",
     "kyujin": "nmixx",
+    "lily": "nmixx",
     "karina": "aespa",
     "winter": "aespa",
     "giselle": "aespa",
     "ningning": "aespa",
-    "hayoung": "fromis_9",
+    "hayoung": "fromis_9",   # 同名於 Apink；裸名 fallback 預設 Fromis_9
+    "hayoung_fromis9": "fromis_9",
+    "hayoung_apink":   "apink",
     "iu": "",  # solo
+    # Apink（2011出道）
+    "chorong": "apink",
+    "bomi":    "apink",
+    "eunji":   "apink",
+    "naeun":   "apink",
+    "namjoo":  "apink",
+    # BLACKPINK
+    "jisoo": "blackpink",
+    "jennie": "blackpink",
+    "rose": "blackpink",
+    "rosé": "blackpink",
+    "lisa": "blackpink",
+    # TWICE
+    "nayeon": "twice",
+    "jeongyeon": "twice",
+    "momo": "twice",
+    "sana": "twice",
+    "jihyo": "twice",
+    "mina": "twice",
+    "dahyun": "twice",
+    "chaeyoung": "twice",  # 同名於 Fromis_9；此為裸名 fallback，以 TWICE 為預設 hashtag
+    "chaeyoung_twice":    "twice",
+    "chaeyoung_fromis9":  "fromis_9",
+    "tzuyu": "twice",
+    # NewJeans
+    "minji": "newjeans",
+    "hanni": "newjeans",
+    "danielle": "newjeans",
+    "haerin": "newjeans",
+    "hyein": "newjeans",
+    # (G)I-DLE
+    "miyeon": "gidle",
+    "minnie": "gidle",
+    "soyeon": "gidle",
+    "yuqi": "gidle",
+    "shuhua": "gidle",
+    # Red Velvet
+    "irene": "redvelvet",
+    "seulgi": "redvelvet",
+    "wendy": "redvelvet",
+    "joy": "redvelvet",
+    "yeri": "redvelvet",
 }
 
 
@@ -140,23 +191,160 @@ def _save_celeb_groups(user_groups):
         return False
 
 
+# ── 衝突名字處理（同名於多團，例：Chaeyoung ∈ {TWICE, Fromis_9}） ──
+# 與前端 AV_GROUPS 同步，用來偵測衝突名 + 在 person key 裡編碼團名。
+# Folder key 範例：`Chaeyoung_TWICE`、`Chaeyoung_Fromis9`；
+# sanitize_name 轉小寫後成為獨立資料夾（chaeyoung_twice、chaeyoung_fromis9）。
+_AV_GROUPS_PY = {
+    'Fromis_9':    ['Saerom', 'Hayoung', 'Gyuri', 'Jiwon', 'Jisun', 'Seoyeon', 'Chaeyoung', 'Nagyung', 'Jiheon'],
+    'IVE':         ['Yujin', 'Gaeul', 'Rei', 'Wonyoung', 'Liz', 'Leeseo'],
+    'Babymonster': ['Ruka', 'Pharita', 'Asa', 'Ahyeon', 'Rami', 'Rora', 'Chiquita'],
+    'IU':          ['IU'],
+    'QWER':        ['Chodan', 'Magenta', 'Hina', 'Siyeon'],
+    'Illit':       ['Yunah', 'Minju', 'Moka', 'Wonhee', 'Iroha'],
+    'H2H':         ['Carmen', 'Jiwoo', 'Yuha', 'Stella', 'Juun', 'Ana', 'Ian', 'Yeon'],
+    'aespa':       ['Karina', 'Winter', 'Giselle', 'Ningning'],
+    'ITZY':        ['Yeji', 'Lia', 'Ryujin', 'Chaeryeong', 'Yuna'],
+    'LE_SSERAFIM': ['Sakura', 'Chaewon', 'Yunjin', 'Kazuha', 'Eunchae'],
+    'BLACKPINK':   ['Jisoo', 'Jennie', 'Rosé', 'Lisa'],
+    'TWICE':       ['Nayeon', 'Jeongyeon', 'Momo', 'Sana', 'Jihyo', 'Mina', 'Dahyun', 'Chaeyoung', 'Tzuyu'],
+    'NewJeans':    ['Minji', 'Hanni', 'Danielle', 'Haerin', 'Hyein'],
+    '(G)I-DLE':    ['Miyeon', 'Minnie', 'Soyeon', 'Yuqi', 'Shuhua'],
+    'Red Velvet':  ['Irene', 'Seulgi', 'Wendy', 'Joy', 'Yeri'],
+    'NMIXX':       ['Lily', 'Haewon', 'Sullyoon', 'Bae', 'Jiwoo', 'Kyujin'],
+    'Apink':       ['Chorong', 'Bomi', 'Eunji', 'Naeun', 'Namjoo', 'Hayoung'],
+}
+
+def _group_slug(g):
+    """去掉所有非字母數字字元，例：'(G)I-DLE' → 'GIDLE'、'Fromis_9' → 'Fromis9'、'Red Velvet' → 'RedVelvet'。"""
+    import re as _re
+    return _re.sub(r'[^A-Za-z0-9]', '', g or '')
+
+_AV_NAME_GROUPS = {}
+for _g, _ms in _AV_GROUPS_PY.items():
+    for _m in _ms:
+        _AV_NAME_GROUPS.setdefault(_m, []).append(_g)
+
+# ── Groups/members canonical JSON（2026-04-23 新增）──
+# data/groups.json 是前後端共用的 single source of truth。
+# 若檔案存在且解析成功，會 **覆蓋** 上方 hardcoded 的 `_DEFAULT_CELEB_GROUPS`、
+# `_AV_GROUPS_PY`、`_AV_NAME_GROUPS`；hardcoded 保留為 fallback。
+_GROUPS_CONFIG_PATH = os.path.join(APP_DIR, "data", "groups.json")
+_AV_KO_NAMES_PY = {}  # 韓文名（新增欄位，以前只在前端 hardcoded）
+_GROUPS_CONFIG_RAW = None  # 給 /api/groups-data + template 注入使用
+
+def _load_groups_config():
+    """讀 data/groups.json → 回傳 parsed dict；失敗回 None。"""
+    if not os.path.isfile(_GROUPS_CONFIG_PATH):
+        return None
+    try:
+        with open(_GROUPS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "groups" not in data:
+            logging.warning("[groups.json] 格式錯誤：缺少 groups 欄位")
+            return None
+        return data
+    except Exception as e:
+        logging.warning(f"[groups.json] 載入失敗: {e}")
+        return None
+
+
+def _apply_groups_config(data):
+    """把 JSON 的內容套用到模組 level 常數。"""
+    global _DEFAULT_CELEB_GROUPS, _AV_GROUPS_PY, _AV_NAME_GROUPS, _AV_KO_NAMES_PY
+    # 1) 重建 _AV_GROUPS_PY：group_name → [members]
+    new_groups = {}
+    for g_name, g_info in (data.get("groups") or {}).items():
+        if not isinstance(g_info, dict): continue
+        members = g_info.get("members") or []
+        if isinstance(members, list) and members:
+            new_groups[g_name] = list(members)
+    if new_groups:
+        _AV_GROUPS_PY = new_groups
+
+    # 2) 重建 _AV_NAME_GROUPS
+    new_name_groups = {}
+    for g, ms in _AV_GROUPS_PY.items():
+        for m in ms:
+            new_name_groups.setdefault(m, []).append(g)
+    _AV_NAME_GROUPS = new_name_groups
+
+    # 3) 重建 _DEFAULT_CELEB_GROUPS：名字(lower) → group_slug
+    #    先從 groups 的 members auto-populate（衝突由後面的 overrides 決定 fallback）
+    new_default = {}
+    for g_name, g_info in (data.get("groups") or {}).items():
+        slug = (g_info or {}).get("slug", "") or ""
+        for m in (g_info or {}).get("members", []) or []:
+            key = m.lower()
+            # 不覆蓋已存在的（第一次設定的為準；衝突名由 overrides 決定）
+            new_default.setdefault(key, slug)
+    # overrides 強制寫入（處理衝突名 fallback、別名、多拼法）
+    for k, v in (data.get("name_group_overrides") or {}).items():
+        new_default[k.lower().strip()] = (v or "").strip()
+    if new_default:
+        _DEFAULT_CELEB_GROUPS = new_default
+
+    # 4) ko_names
+    kn = data.get("ko_names") or {}
+    if isinstance(kn, dict):
+        _AV_KO_NAMES_PY = dict(kn)
+
+# 載入設定（若存在則覆寫預設）
+_GROUPS_CONFIG_RAW = _load_groups_config()
+if _GROUPS_CONFIG_RAW:
+    _apply_groups_config(_GROUPS_CONFIG_RAW)
+    logging.info(
+        f"[groups.json] 已載入 canonical groups: {len(_AV_GROUPS_PY)} 團、"
+        f"{sum(len(v) for v in _AV_GROUPS_PY.values())} 位成員、"
+        f"{len(_AV_KO_NAMES_PY)} 筆韓文名"
+    )
+
+def _split_person_key(key):
+    """把 `Chaeyoung_TWICE` 拆成 (display='Chaeyoung', group='TWICE')。
+
+    規則：
+      - key 必須含底線；最後一段 slug 必須對應某個已知團名
+      - 前半段 name 必須在 >=2 個團裡都出現（真的衝突才拆）
+      - 否則整串當 person name 返回：(key, '')
+    """
+    if not key or '_' not in key:
+        return key, ''
+    head, _, tail = key.rpartition('_')
+    if len(_AV_NAME_GROUPS.get(head, [])) < 2:
+        return key, ''
+    for _g in _AV_GROUPS_PY:
+        if _group_slug(_g) == tail:
+            return head, _g
+    return key, ''
+
+def _display_name(person_key):
+    """取顯示名（若 key 為衝突名後綴形式則脫掉後綴，否則原樣）。"""
+    return _split_person_key(person_key)[0]
+
+
 def _generate_caption(person):
     """根據格式 `{name} #{name} #{group}` 生成文案與 hashtags。
 
     回傳 dict: {"caption": str, "hashtags": [str, ...], "text": str}
     """
-    name = (person or "").strip()
-    if not name:
+    name_raw = (person or "").strip()
+    if not name_raw:
         return {"caption": "", "hashtags": [], "text": ""}
-    key = name.lower()
+    # 衝突名字的 key（例：Chaeyoung_TWICE）要拆成顯示名 + 團名
+    display, group_from_key = _split_person_key(name_raw)
     groups = _load_celeb_groups()
-    group = groups.get(key, "")
-    tags = [name]
+    # 先以完整 key 查（允許 celeb_groups.json 為 chaeyoung_twice 設定特定 group）
+    group = groups.get(name_raw.lower(), "")
+    if not group:
+        group = groups.get(display.lower(), "")
+    if not group and group_from_key:
+        group = group_from_key
+    tags = [display]
     if group:
         tags.append(group)
-    text = name + " " + " ".join(f"#{t}" for t in tags)
+    text = display + " " + " ".join(f"#{t}" for t in tags)
     return {
-        "caption": name,
+        "caption": display,
         "hashtags": tags,
         "text": text,
     }
@@ -939,70 +1127,131 @@ class ImageDownloader:
                 except Exception:
                     pass
         self._next = db.count(celebrity) + 1
+        # 並發下載的共享狀態保護：phash_cache / _next / stats
+        self._write_lock = threading.Lock()
 
     def stop(self):
         self._stop.set()
 
     def download_all(self, urls, dedup_url=True, dedup_md5=True,
-                     dedup_phash=True, progress_cb=None, log_cb=None):
+                     dedup_phash=True, progress_cb=None, log_cb=None,
+                     max_workers=8):
+        """並行下載（2026-04-23 升級）。
+
+        預設 8 個 worker thread。HTTP GET / PIL verify / 寫檔都在鎖外，
+        只有 `_phash_cache` 查重、filename reserve、stats 更新進短 critical section。
+        序列版的單次 `_one` 原本 ~1-2 秒（HTTP），平行後 120 張從 ~150s 壓到 ~25s。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         total = len(urls)
-        for i, url in enumerate(urls):
+        if not total:
+            return self.stats
+
+        done = [0]
+        done_lock = threading.Lock()
+
+        def _task(url):
             if self._stop.is_set():
-                if log_cb: log_cb("stop", "使用者中止", {})
-                break
-            r = self._one(url, dedup_url, dedup_md5, dedup_phash)
-            if progress_cb: progress_cb(i + 1, total, self.stats)
-            if log_cb: log_cb(r["status"], r.get("msg", ""), r)
+                return {"status": "stop", "msg": "使用者中止"}
+            try:
+                return self._one(url, dedup_url, dedup_md5, dedup_phash)
+            except Exception as e:
+                with self._write_lock:
+                    self.stats["failed"] += 1
+                return {"status": "error", "msg": f"thread error: {e}"}
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dl") as ex:
+            futures = [ex.submit(_task, u) for u in urls]
+            try:
+                for fut in as_completed(futures):
+                    if self._stop.is_set():
+                        for f in futures:
+                            f.cancel()
+                        if log_cb: log_cb("stop", "使用者中止", {})
+                        break
+                    try:
+                        r = fut.result()
+                    except Exception as e:
+                        r = {"status": "error", "msg": f"unknown: {e}"}
+                    with done_lock:
+                        done[0] += 1
+                        d = done[0]
+                    if progress_cb: progress_cb(d, total, self.stats)
+                    if log_cb: log_cb(r["status"], r.get("msg", ""), r)
+            except KeyboardInterrupt:
+                self._stop.set()
+                raise
         return self.stats
 
     def _one(self, url, du, dm, dp):
+        """單張下載。Thread-safe：狀態寫入都經 self._write_lock，HTTP/寫檔在鎖外。"""
         if du and self.db.url_exists(url):
-            self.stats["skip_url"] += 1
+            with self._write_lock:
+                self.stats["skip_url"] += 1
             return {"status": "skip_url", "msg": "URL 已存在，跳過"}
         try:
             resp = self.session.get(url, timeout=20)
             resp.raise_for_status()
             data = resp.content
         except Exception as e:
-            self.stats["failed"] += 1
+            with self._write_lock:
+                self.stats["failed"] += 1
             return {"status": "error", "msg": f"下載失敗: {e}"}
         if len(data) > MAX_FILE_SIZE or len(data) < 1000:
-            self.stats["failed"] += 1
+            with self._write_lock:
+                self.stats["failed"] += 1
             return {"status": "error", "msg": "檔案大小異常"}
         try:
             img = Image.open(BytesIO(data)); img.verify()
             img = Image.open(BytesIO(data))
             w, h = img.size
         except Exception:
-            self.stats["failed"] += 1
+            with self._write_lock:
+                self.stats["failed"] += 1
             return {"status": "error", "msg": "非有效圖片"}
         md5 = hashlib.md5(data).hexdigest()
         if dm and self.db.md5_exists(md5):
-            self.stats["skip_md5"] += 1
+            with self._write_lock:
+                self.stats["skip_md5"] += 1
             return {"status": "skip_md5", "msg": "MD5 重複，跳過"}
         phash_str = None
+        phash_val = None
         if HAS_IMAGEHASH and dp:
             try:
-                pv = imagehash.phash(img); phash_str = str(pv)
-                for ex in self._phash_cache:
-                    if abs(pv - ex) < PHASH_THRESHOLD:
-                        self.stats["skip_phash"] += 1
-                        return {"status": "skip_phash", "msg": "相似圖片已存在"}
+                phash_val = imagehash.phash(img); phash_str = str(phash_val)
             except Exception:
                 pass
         ext = self._ext(url, data)
-        fn = f"{self._next:05d}{ext}"
-        fp = os.path.join(self.cel_dir, fn)
-        while os.path.exists(fp):
+        # ── 臨界區 A：phash dedup 比對 + filename reserve（短鎖，但要 atomic） ──
+        with self._write_lock:
+            if phash_val is not None:
+                for _ex in self._phash_cache:
+                    if abs(phash_val - _ex) < PHASH_THRESHOLD:
+                        self.stats["skip_phash"] += 1
+                        return {"status": "skip_phash", "msg": "相似圖片已存在"}
+            fn = f"{self._next:05d}{ext}"
+            fp = os.path.join(self.cel_dir, fn)
+            while os.path.exists(fp):
+                self._next += 1
+                fn = f"{self._next:05d}{ext}"; fp = os.path.join(self.cel_dir, fn)
+            # reserve：bump _next 在鎖內以保證唯一性
             self._next += 1
-            fn = f"{self._next:05d}{ext}"; fp = os.path.join(self.cel_dir, fn)
-        with open(fp, "wb") as f:
-            f.write(data)
+        # 寫檔（鎖外，fp 已 reserved）
+        try:
+            with open(fp, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            with self._write_lock:
+                self.stats["failed"] += 1
+            return {"status": "error", "msg": f"寫檔失敗: {e}"}
+        # DB insert（DatabaseManager 自帶 lock）
         self.db.add(self.celebrity, url, fn, md5, phash_str, len(data), w, h, self.source)
-        if phash_str and HAS_IMAGEHASH:
-            self._phash_cache.append(imagehash.hex_to_hash(phash_str))
-        self._next += 1
-        self.stats["downloaded"] += 1
+        # ── 臨界區 B：phash cache append + stats（短鎖） ──
+        with self._write_lock:
+            if phash_str and HAS_IMAGEHASH:
+                try: self._phash_cache.append(imagehash.hex_to_hash(phash_str))
+                except Exception: pass
+            self.stats["downloaded"] += 1
         return {"status": "ok", "msg": f"{fn} ({w}x{h}, {len(data)//1024}KB)"}
 
     @staticmethod
@@ -1030,7 +1279,21 @@ tasks_lock = threading.Lock()
 
 @app.route("/")
 def index():
-    return HTML_PAGE
+    # 把 data/groups.json 的 canonical 資料注入到前端 HTML。
+    # 前端 AV_GROUPS / AV_KO_NAMES 從 Python side 拿，確保 single source of truth。
+    html = HTML_PAGE
+    try:
+        html = html.replace(
+            "__AV_GROUPS_JSON__",
+            json.dumps(_AV_GROUPS_PY, ensure_ascii=False),
+        )
+        html = html.replace(
+            "__AV_KO_NAMES_JSON__",
+            json.dumps(_AV_KO_NAMES_PY, ensure_ascii=False),
+        )
+    except Exception as _e:
+        logging.warning(f"[index] groups.json 注入失敗: {_e}")
+    return html
 
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -1060,6 +1323,28 @@ def api_celebrities():
             result.append({"name": name, "count": count, "last": last})
     result.sort(key=lambda x: x["last"], reverse=True)
     return jsonify(result)
+
+
+@app.route("/api/groups-data")
+def api_groups_data():
+    """回傳 canonical groups/ko_names/name_overrides（從 data/groups.json 或 hardcoded 預設）。
+
+    給外部工具 / 測試 / 前端 debug 用。主要前端是在 HTML 載入時由 template substitution 注入。
+    """
+    if _GROUPS_CONFIG_RAW:
+        # 直接回傳 JSON 原始檔（含註解欄位 _comment 等，保持完整性）
+        return jsonify(_GROUPS_CONFIG_RAW)
+    # fallback：從 hardcoded 常數組出來
+    return jsonify({
+        "version": 1,
+        "_source": "hardcoded_fallback",
+        "groups": {
+            g: {"slug": _group_slug(g).lower(), "members": list(ms)}
+            for g, ms in _AV_GROUPS_PY.items()
+        },
+        "ko_names": dict(_AV_KO_NAMES_PY),
+        "name_group_overrides": {},
+    })
 
 
 @app.route("/api/celeb-groups", methods=["GET", "POST"])
@@ -1097,6 +1382,123 @@ def api_stats():
         "total_photos": sum(c["count"] for c in celebs),
         "has_imagehash": HAS_IMAGEHASH,
     })
+
+
+@app.route("/api/photos-health")
+def api_photos_health():
+    """每個明星資料夾的健康狀態，給 Dashboard 用。
+
+    每個 member 傳回:
+      folder, display, group, photo_count,
+      face_cache_exists, face_cache_built_at,
+      face_kept, face_rejected, (embeddings_raw_rows)
+      status: 'ok' | 'low_photos' | 'low_faces' | 'high_reject' | 'no_cache'
+    """
+    out = []
+    groups_map = _load_celeb_groups()
+    if not os.path.isdir(DOWNLOAD_ROOT):
+        return jsonify({"members": [], "download_root": DOWNLOAD_ROOT, "total": 0})
+
+    IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+    for folder in sorted(os.listdir(DOWNLOAD_ROOT)):
+        full = os.path.join(DOWNLOAD_ROOT, folder)
+        if not os.path.isdir(full): continue
+        if folder.startswith("."): continue
+        # 忽略 _unsorted 等內部資料夾
+        if folder.startswith("_"): continue
+
+        try:
+            names = os.listdir(full)
+        except OSError:
+            continue
+        photos = [n for n in names
+                  if os.path.splitext(n)[1].lower() in IMG_EXTS
+                  and not n.startswith(".")]
+        photo_count = len(photos)
+
+        # resolve display + group
+        _disp, _grp_from_key = _split_person_key(folder)
+        _grp = groups_map.get(folder.lower(), "") or groups_map.get(_disp.lower(), "") or _grp_from_key
+
+        # embedding cache 狀態
+        cache_path = os.path.join(full, ".face_embeddings.npy")
+        meta_path = os.path.join(full, ".face_embeddings.meta.json")
+        face_cache_exists = os.path.isfile(cache_path)
+        face_built_at = None
+        face_raw = face_kept = face_rejected = None
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    m = json.load(f)
+                face_built_at = m.get("built_at")
+                face_raw = m.get("embeddings_raw_rows")
+                face_kept = m.get("embeddings_kept_rows") or m.get("embeddings_rows")
+                face_rejected = m.get("embeddings_rejected_rows")
+            except Exception:
+                pass
+
+        # status
+        if photo_count < 30:
+            status = "low_photos"
+        elif not face_cache_exists:
+            status = "no_cache"
+        elif face_kept is not None and face_kept < 10:
+            status = "low_faces"
+        elif face_rejected and face_raw and face_raw > 0 and (face_rejected / face_raw) > 0.2:
+            status = "high_reject"
+        else:
+            status = "ok"
+
+        out.append({
+            "folder": folder,
+            "display": _disp,
+            "group": _grp,
+            "photo_count": photo_count,
+            "face_cache_exists": face_cache_exists,
+            "face_cache_built_at": face_built_at,
+            "face_raw_rows": face_raw,
+            "face_kept_rows": face_kept,
+            "face_rejected_rows": face_rejected,
+            "status": status,
+        })
+
+    return jsonify({
+        "members": out,
+        "download_root": DOWNLOAD_ROOT,
+        "total": len(out),
+        "generated_at": time.time(),
+    })
+
+
+@app.route("/api/photos-cluster-audit/<path:folder>")
+def api_photos_cluster_audit(folder):
+    """Tier 1 #2：用 HDBSCAN 偵測某成員資料夾是否混了別人。
+
+    Query params:
+      force=1        → 強制 rebuild embeddings（確保 files.json 最新）
+      min_cluster=5  → HDBSCAN min_cluster_size，預設 5
+
+    成功回：
+      {ok:True, person, n_photos, n_clusters, dominant_fraction, is_mixed,
+       clusters:[{label,size,fraction,cohesion,example_files:[...]}]}
+    失敗回：
+      {ok:False, reason}
+    """
+    from flask import request
+    force = request.args.get("force", "0") in ("1", "true", "yes")
+    try:
+        min_cs = int(request.args.get("min_cluster", 5))
+        min_cs = max(3, min(15, min_cs))
+    except Exception:
+        min_cs = 5
+
+    safe_folder = sanitize_name(folder)
+    try:
+        result = _audit_folder_clusters(safe_folder, min_cluster_size=min_cs, force_rebuild=force)
+    except Exception as e:
+        logging.exception(f"[cluster-audit] {safe_folder} failed")
+        return jsonify({"ok": False, "reason": f"{type(e).__name__}: {e}"}), 500
+    return jsonify(result)
 
 
 @app.route("/api/images/<celebrity>")
@@ -1216,9 +1618,41 @@ def _download_worker(task_id, q, celebrity, opts, is_batch=False):
         append_photo = opts.get("append_photo", True)
         auto_keyword = opts.get("auto_keyword", True)
 
+        # 衝突名字：celebrity 可能是 'Chaeyoung_TWICE' 這類 key
+        # folder 用完整 key（保持隔離），搜尋詞用 "Group Display"
+        _disp, _grp = _split_person_key(celebrity)
+        if _disp != celebrity:
+            _search_base = f"{_grp} {_disp}".strip() if _grp else _disp
+            q.put({"type": "log",
+                   "msg": f"衝突名字解析: key='{celebrity}' → 搜尋詞='{_search_base}'（資料夾: {sanitize_name(celebrity)}）",
+                   "tag": "info"})
+        else:
+            # 無衝突裸名 → 若知道所屬團，仍自動加團名前綴以提升搜尋精準度
+            # （例：Mina, Yuna, Sana 這類短/常見名，加團名大幅降低 false positive）
+            _groups_map = _load_celeb_groups()
+            _auto_grp = _groups_map.get(celebrity.lower(), "")
+            if _auto_grp:
+                _search_base = f"{_auto_grp} {celebrity}"
+                q.put({"type": "log",
+                       "msg": f"搜尋詞自動加團名: '{celebrity}' → '{_search_base}'",
+                       "tag": "info"})
+            else:
+                _search_base = celebrity
+
         # 產生關鍵字列表，過濾掉已用過的
-        if auto_keyword:
-            all_keywords = generate_keywords(celebrity, append_photo)
+        _override_kw = (opts.get("search_keyword") or "").strip()
+        if _override_kw:
+            # 呼叫端明確指定搜尋詞（例如 "ITZY Yuna"）：生成以該詞為基礎的變體
+            base = _override_kw
+            if auto_keyword:
+                keywords = generate_keywords(base, append_photo)
+            else:
+                keywords = [base + (" photo" if append_photo else "")]
+            q.put({"type": "log",
+                    "msg": f"覆寫搜尋詞: {base} → {len(keywords)} 組變體",
+                    "tag": "info"})
+        elif auto_keyword:
+            all_keywords = generate_keywords(_search_base, append_photo)
             used = set(db.get_used_keywords(celebrity))
             keywords = [kw for kw in all_keywords if kw not in used]
             if not keywords:
@@ -1228,7 +1662,7 @@ def _download_worker(task_id, q, celebrity, opts, is_batch=False):
                     "msg": f"可用關鍵字: {len(keywords)} 組（已用過: {len(used)} 組）",
                     "tag": "info"})
         else:
-            kw = celebrity
+            kw = _search_base
             if append_photo:
                 kw += " photo"
             keywords = [kw]
@@ -2346,6 +2780,17 @@ def _yt_search_worker(q, query, max_results, video_type, platform):
                 info = ydl.extract_info(f"ytsearch{max_results}:{search_query}", download=False)
                 entries = info.get("entries", [])
 
+        # Wave 4 S10: YouTube 搜尋階段就過濾掉明顯不適合的結果
+        # 只在 YouTube 關鍵字搜尋情境啟用（URL / TikTok / playlist 不過濾）
+        _apply_s10 = (platform == "youtube") and (not is_url)
+        _s10_bad_title = re.compile(
+            r'(?i)\b(reaction|reacts?\s+to|react\s+video|compilation|'
+            r'\d+\s*hour[s]?\b|try\s+not\s+to|analysis|tutorial|'
+            r'interview|press\s+con|commentary|lyric[s]?\s+video|'
+            r'slowed(\s|\+)?reverb|nightcore|10\s*h\b|1\s*h\s*loop)'
+        )
+        _s10_rej = {"short": 0, "long": 0, "title": 0, "nodur": 0}
+
         results = []
         for e in entries[:max_results]:
             if not e:
@@ -2357,17 +2802,41 @@ def _yt_search_worker(q, query, max_results, video_type, platform):
                     vid_url = f"https://www.tiktok.com/video/{vid_id}"
                 else:
                     vid_url = f"https://www.youtube.com/watch?v={vid_id}"
+            _title = e.get("title", "") or ""
+            _dur = e.get("duration")
+            if _apply_s10:
+                if _dur is None:
+                    # extract_flat 的結果可能沒有 duration；保留不過濾
+                    _s10_rej["nodur"] += 1
+                else:
+                    try:
+                        _dv = float(_dur)
+                    except Exception:
+                        _dv = 0.0
+                    if _dv < 10:
+                        _s10_rej["short"] += 1
+                        continue
+                    if _dv > 900:
+                        _s10_rej["long"] += 1
+                        continue
+                if _title and _s10_bad_title.search(_title):
+                    _s10_rej["title"] += 1
+                    continue
             results.append({
                 "id": vid_id,
-                "title": e.get("title", ""),
+                "title": _title,
                 "url": vid_url,
-                "duration": e.get("duration"),
+                "duration": _dur,
                 "channel": e.get("channel") or e.get("uploader") or e.get("creator", ""),
                 "view_count": e.get("view_count"),
                 "thumbnail": e.get("thumbnail") or (
                     f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg" if platform == "youtube" else ""),
                 "platform": platform,
             })
+        if _apply_s10 and sum(_s10_rej.values()) > 0:
+            logging.info(f"S10 search filter: short={_s10_rej['short']} "
+                         f"long={_s10_rej['long']} title={_s10_rej['title']} "
+                         f"(kept {len(results)}/{len(entries[:max_results])})")
 
         # 標記已下載 / 已擷取
         dl_ids, ex_ids = _get_existing_ids(query)
@@ -2708,6 +3177,10 @@ def serve_yt_file(filename):
     safe = os.path.normpath(os.path.join(YT_ROOT, filename))
     if not safe.startswith(os.path.normpath(YT_ROOT)):
         return "Forbidden", 403
+    dl = (request.args.get("dl") or "").strip()
+    if dl:
+        dl = os.path.basename(dl)  # 防路徑注入
+        return send_from_directory(YT_ROOT, filename, as_attachment=True, download_name=dl)
     return send_from_directory(YT_ROOT, filename)
 
 
@@ -2735,8 +3208,110 @@ def api_yt_delete_output():
 
 
 # ── 影片 → 照片擷取 ──────────────────────────────────────
-UPLOAD_TMP = os.path.join(APP_DIR, "tmp_uploads")
+UPLOAD_TMP = os.environ.get("UPLOAD_TMP", os.path.join(APP_DATA_DIR, "tmp_uploads"))
 os.makedirs(UPLOAD_TMP, exist_ok=True)
+
+# BGM（背景音樂）上傳目錄
+BGM_DIR = os.environ.get("BGM_DIR", os.path.join(APP_DATA_DIR, "bgm"))
+os.makedirs(BGM_DIR, exist_ok=True)
+_BGM_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+
+
+def _resolve_bgm_path(bgm_input):
+    """
+    把前端傳來的 bgm 輸入解析成實際檔案路徑。支援：
+      - 完整檔名（BGM_DIR 下）："my_song.mp3"
+      - 絕對路徑（需存在）
+      - None / 空字串 / "none" / "off" → None
+    安全限制：非絕對路徑必須落在 BGM_DIR 或 UPLOAD_TMP 下。
+    """
+    if not bgm_input:
+        return None
+    s = str(bgm_input).strip()
+    if not s or s.lower() in ("none", "off", "disabled"):
+        return None
+    # 絕對路徑 → 只接受副檔名為音訊
+    if os.path.isabs(s):
+        if os.path.isfile(s) and os.path.splitext(s)[1].lower() in _BGM_AUDIO_EXTS:
+            return s
+        return None
+    # 相對路徑 → 先試 BGM_DIR，再試 UPLOAD_TMP
+    for base in (BGM_DIR, UPLOAD_TMP):
+        p = os.path.normpath(os.path.join(base, s))
+        # 防 path traversal
+        if not p.startswith(os.path.normpath(base)):
+            continue
+        if os.path.isfile(p) and os.path.splitext(p)[1].lower() in _BGM_AUDIO_EXTS:
+            return p
+    return None
+
+
+@app.route("/api/bgm/list", methods=["GET"])
+def api_bgm_list():
+    """列出 BGM_DIR 內所有可用的背景音樂檔。"""
+    try:
+        files = []
+        for f in sorted(os.listdir(BGM_DIR)):
+            fp = os.path.join(BGM_DIR, f)
+            if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in _BGM_AUDIO_EXTS:
+                _sz = os.path.getsize(fp)
+                files.append({
+                    "name": f,
+                    "size_mb": round(_sz / 1024 / 1024, 2),
+                    "size_kb": round(_sz / 1024),
+                })
+        return jsonify({"ok": True, "files": files, "dir": BGM_DIR})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/bgm/upload", methods=["POST"])
+def api_bgm_upload():
+    """上傳 BGM 檔案到 BGM_DIR。回傳檔名供後續 API 使用。
+    支援欄位名：bgm / file（前者為舊版，後者為 UI 預設）。"""
+    f = request.files.get("bgm") or request.files.get("file")
+    if f is None:
+        return jsonify({"error": "未上傳 BGM 檔案"}), 400
+    name = (f.filename or "").strip()
+    if not name:
+        return jsonify({"error": "檔名不可空"}), 400
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _BGM_AUDIO_EXTS:
+        return jsonify({"error": f"不支援的格式 {ext}（支援 {', '.join(_BGM_AUDIO_EXTS)}）"}), 400
+    # 簡易 sanitize：只保留英數/中文/底線/點/減號
+    import re as _re
+    safe_name = _re.sub(r'[^\w\-.\u4e00-\u9fff]', '_', name)
+    if not safe_name.lower().endswith(ext):
+        safe_name = safe_name + ext
+    dest = os.path.join(BGM_DIR, safe_name)
+    # 避免覆蓋：若已存在就加時間戳
+    if os.path.isfile(dest):
+        stem, _ext = os.path.splitext(safe_name)
+        safe_name = f"{stem}_{int(time.time())}{_ext}"
+        dest = os.path.join(BGM_DIR, safe_name)
+    try:
+        f.save(dest)
+    except Exception as e:
+        return jsonify({"error": f"儲存失敗: {e}"}), 500
+    size_mb = os.path.getsize(dest) / 1024 / 1024
+    return jsonify({"ok": True, "name": safe_name, "size_mb": round(size_mb, 2)})
+
+
+@app.route("/api/bgm/delete", methods=["POST"])
+def api_bgm_delete():
+    """刪除 BGM_DIR 內指定檔案。"""
+    data = request.get_json(force=True)
+    name = (data.get("name") or "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return jsonify({"error": "無效的檔名"}), 400
+    fp = os.path.join(BGM_DIR, name)
+    if not os.path.isfile(fp):
+        return jsonify({"error": "檔案不存在"}), 404
+    try:
+        os.remove(fp)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/photos/from-video", methods=["POST"])
@@ -2944,6 +3519,21 @@ def api_yt_compile_selected():
     transition = data.get("transition", "crossfade")
     transition_dur = float(data.get("transition_dur", 0.5))
     audio_mode = data.get("audio_mode", "original")
+    bgm_path = _resolve_bgm_path(data.get("bgm_path") or data.get("bgm"))
+    try:
+        bgm_volume = float(data.get("bgm_volume", 1.0))
+    except Exception:
+        bgm_volume = 1.0
+    try:
+        bgm_start = float(data.get("bgm_start", 0.0))
+    except Exception:
+        bgm_start = 0.0
+    # Wave 5/6 進階選項
+    enhance = bool(data.get("enhance", False))
+    stabilize = bool(data.get("stabilize", False))
+    interpolate_60fps = bool(data.get("interpolate_60fps", False))
+    upscale_target = (data.get("upscale_target") or "").strip() or None
+    two_pass_loudnorm_opt = bool(data.get("two_pass_loudnorm", True))
 
     if not person or not clips_input:
         return jsonify({"error": "缺少人物名稱或片段"}), 400
@@ -2990,6 +3580,11 @@ def api_yt_compile_selected():
                 clips, clip_duration, out_path, transition,
                 transition_dur, resolution, compile_cb,
                 audio_mode=audio_mode,
+                bgm_path=bgm_path, bgm_volume=bgm_volume, bgm_start=bgm_start,
+                enhance=enhance, stabilize=stabilize,
+                interpolate_60fps=interpolate_60fps,
+                upscale_target=upscale_target,
+                two_pass_loudnorm=two_pass_loudnorm_opt,
             )
 
             if result and os.path.isfile(result):
@@ -3025,21 +3620,50 @@ def api_yt_compile_selected():
 # ══════════════════════════════════════════════════════════
 #  人臉辨識影片擷取
 # ══════════════════════════════════════════════════════════
-MODELS_DIR = os.path.join(APP_DIR, "models")
+MODELS_DIR = os.environ.get("MODELS_DIR", os.path.join(APP_DATA_DIR, "models"))
 YUNET_MODEL = os.path.join(MODELS_DIR, "yunet.onnx")
 SFACE_MODEL = os.path.join(MODELS_DIR, "sface.onnx")
+ARCFACE_MODEL = os.path.join(MODELS_DIR, "arcface_r50.onnx")
 HAS_FACE_MODELS = os.path.isfile(YUNET_MODEL) and os.path.isfile(SFACE_MODEL)
+# ── 2026-04-23 Tier 1 #1：有 arcface_r50.onnx 就優先用 (512-D, 2022 模型) ──
+# 仍保留 SFace (128-D, 2021) 做後備與 alignCrop 對齊
+HAS_ARCFACE = os.path.isfile(ARCFACE_MODEL)
+_FACE_MODEL_ID = "arcface_r50" if HAS_ARCFACE else "sface"
+_FACE_EMB_DIM = 512 if HAS_ARCFACE else 128
 
 try:
     import cv2
     import numpy as np
     HAS_CV2 = True
+    # ── 並行加速 #1：讓 OpenCV / PyTorch 盡量吃滿多核 ──
+    # 205 有 10 核，預設只會用 1~4 核；顯式設為 10 可讓 cv2 內部的
+    # filter / resize / Laplacian / DNN CPU backend 全部使用多執行緒。
+    try:
+        cv2.setNumThreads(10)
+    except Exception:
+        pass
+    try:
+        import torch as _torch_for_threads
+        _torch_for_threads.set_num_threads(10)
+        try:
+            _torch_for_threads.set_num_interop_threads(4)
+        except Exception:
+            pass
+    except Exception:
+        pass
 except ImportError:
     HAS_CV2 = False
 
 EXTRACT_CONFIG = {
     "sample_interval": 1.0,       # 每幾秒取一幀
-    "similarity_threshold": 0.40, # SFace cosine similarity 門檻 (SFace 建議 0.363，提高到 0.40 減少誤判)
+    # cosine similarity 門檻，依 face model 自動調整：
+    #   SFace (128-D): 0.40 — 官方建議 0.363；本專案實測 SFace 對 apink 內團員的 cross-person
+    #                          分數仍到 0.42~0.50，需要 0.40 以上才能拒絕
+    #   ArcFace R50 (512-D): 0.32 — 2026-04-23 sanity test 顯示 ArcFace 的 within/cross 分離
+    #                               比 SFace 乾淨，0.32 落在 cross-p95 ~ within-p5 中間
+    "similarity_threshold": 0.32 if HAS_ARCFACE else 0.40,
+    "similarity_threshold_sface":   0.40,
+    "similarity_threshold_arcface": 0.32,
     "merge_gap": 3.0,             # 時間段合併間隔（秒）
     "padding": 0.5,               # 每段前後緩衝（秒）
     "max_ref_photos": 80,         # 最多用幾張參考照
@@ -3092,23 +3716,262 @@ extract_tasks = {}
 extract_tasks_lock = threading.Lock()
 
 
+# ──────────────────────────────────────────────────────────
+#  ArcFace R50 adapter (onnxruntime) + FIQA
+#  Tier 1 #1 & Tier 2 #4 — 2026-04-23
+# ──────────────────────────────────────────────────────────
+_ARCFACE_SESSION = None
+_ARCFACE_LOCK = threading.Lock()
+
+
+def _get_arcface_session():
+    """Lazy-init a global onnxruntime InferenceSession for ArcFace R50."""
+    global _ARCFACE_SESSION
+    if _ARCFACE_SESSION is not None:
+        return _ARCFACE_SESSION
+    with _ARCFACE_LOCK:
+        if _ARCFACE_SESSION is not None:
+            return _ARCFACE_SESSION
+        try:
+            import onnxruntime as _ort
+            sess_opts = _ort.SessionOptions()
+            # 配合 setNumThreads(10)：讓 ORT 也吃滿 CPU
+            try:
+                sess_opts.intra_op_num_threads = 10
+                sess_opts.inter_op_num_threads = 2
+            except Exception:
+                pass
+            _ARCFACE_SESSION = _ort.InferenceSession(
+                ARCFACE_MODEL, sess_options=sess_opts,
+                providers=["CPUExecutionProvider"])
+            logging.info(f"[arcface] session initialized: {ARCFACE_MODEL}")
+        except Exception as e:
+            logging.warning(f"[arcface] failed to init session: {e}")
+            raise
+    return _ARCFACE_SESSION
+
+
+class _FaceRecognizerArcFace:
+    """Drop-in replacement for cv2.FaceRecognizerSF — exposes alignCrop()
+    (delegated to SFace, whose ArcFace-template alignment matches InsightFace)
+    and feature() (returns 512-D ArcFace R50 embedding).
+
+    Kept API-compatible with SFace:
+      - alignCrop(img_bgr, face_row) -> 112x112 aligned BGR image
+      - feature(aligned_bgr)         -> np.ndarray shape (1, 512), float32
+    """
+
+    def __init__(self, sface_fallback):
+        self._sface = sface_fallback
+        self._sess = _get_arcface_session()
+        self._input_name = self._sess.get_inputs()[0].name
+
+    def alignCrop(self, img_bgr, face_row):
+        # SFace 的 alignCrop 用 ArcFace 5-landmark template，輸出 112x112 BGR，
+        # 這跟 InsightFace buffalo_l 訓練時用的對齊方式一致，可直接餵 ArcFace。
+        return self._sface.alignCrop(img_bgr, face_row)
+
+    def feature(self, aligned_bgr):
+        # ArcFace 訓練時使用 RGB + (x-127.5)/127.5
+        try:
+            rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB)
+            x = (rgb.astype(np.float32) - 127.5) / 127.5
+            x = np.transpose(x, (2, 0, 1))[None, :, :, :]
+            emb = self._sess.run(None, {self._input_name: x})[0]
+            # shape (1, 512) — SFace 原本就是 (1, 128)，保持形狀一致
+            return emb.astype(np.float32)
+        except Exception as e:
+            logging.warning(f"[arcface] feature() failed, falling back to SFace: {e}")
+            return self._sface.feature(aligned_bgr)
+
+
+def _pass_fiqa(aligned_bgr, min_lap_var=30.0, min_brightness=40.0, max_brightness=230.0):
+    """Heuristic Face Image Quality Assessment (Tier 2 #4).
+
+    在把一張臉加進 reference library 之前，用輕量規則擋掉模糊/太暗/過曝的臉，
+    避免高噪聲照片污染 embedding 平均像。判斷寬鬆，有疑慮就放行（False positive
+    比 false negative 好 — 我們寧可多收幾張，也不要把正常照片誤殺）。
+
+    aligned_bgr: 112x112 BGR（alignCrop 輸出）
+    Returns True = pass, False = reject.
+    """
+    try:
+        if aligned_bgr is None or aligned_bgr.size == 0:
+            return False
+        gray = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2GRAY)
+        # Laplacian variance ~ 模糊偵測。越低越糊。
+        lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        if lap < min_lap_var:
+            return False
+        mean_b = float(gray.mean())
+        if mean_b < min_brightness or mean_b > max_brightness:
+            return False
+        return True
+    except Exception:
+        # 保守處理：錯誤時放行
+        return True
+
+
 def _build_face_models(width=320, height=320):
-    """建立人臉偵測器和辨識器"""
+    """建立人臉偵測器和辨識器。
+    Tier 1 #1 (2026-04-23)：若 arcface_r50.onnx 存在，回傳 ArcFace R50 adapter（512-D）；
+    否則 fallback 回 SFace (128-D)。
+    """
     detector = cv2.FaceDetectorYN.create(YUNET_MODEL, "", (width, height), 0.7, 0.3, 5000)
-    recognizer = cv2.FaceRecognizerSF.create(SFACE_MODEL, "")
+    sface = cv2.FaceRecognizerSF.create(SFACE_MODEL, "")
+    if HAS_ARCFACE:
+        try:
+            recognizer = _FaceRecognizerArcFace(sface_fallback=sface)
+        except Exception as e:
+            logging.warning(f"[face-models] ArcFace init failed, using SFace: {e}")
+            recognizer = sface
+    else:
+        recognizer = sface
     return detector, recognizer
 
 
+def _cv_imread_unicode(fpath):
+    """Windows-safe 讀圖：cv2.imread 無法讀取含非 ASCII 字元的路徑（如「rosé」），
+    改用 numpy.fromfile + cv2.imdecode 繞過。
+    讀取失敗回傳 None，與原 cv2.imread 相容。
+    """
+    try:
+        arr = np.fromfile(fpath, dtype=np.uint8)
+        if arr.size == 0:
+            return None
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def _cv_imwrite_unicode(fpath, img, params=None):
+    """Windows-safe 寫圖：cv2.imwrite 同樣無法處理含非 ASCII 字元的路徑。
+    改用 cv2.imencode + numpy.tofile 繞過。成功回傳 True。"""
+    try:
+        ext = os.path.splitext(fpath)[1] or ".jpg"
+        ok, buf = cv2.imencode(ext, img, params or [])
+        if not ok:
+            return False
+        buf.tofile(fpath)
+        return True
+    except Exception:
+        return False
+
+
+def _filter_outlier_embeddings(mat, min_keep_ratio=0.5, inlier_threshold=0.30):
+    """用 2-pass centroid refinement 過濾 outlier embeddings。
+
+    用途：下載到的照片有可能混入別人（路人、合照、其他成員、同名但不同人）。
+    這些 outlier 會污染 reference embedding，降低 face matching 準確度。
+
+    演算法：
+      Pass 1（粗濾）：拿全部 emb 算 centroid，丟掉 bottom 20% 的離群點
+      Pass 2（細濾）：用 pass-1 inliers 再算 centroid（更乾淨），硬門檻 0.30 cosine
+      保底：至少保留 min_keep_ratio 的 emb（避免極端情況把好人也丟掉）
+
+    參數：
+      mat: (N, D) row-normalized embeddings
+      min_keep_ratio: 最少保留比例（防止過度過濾）
+      inlier_threshold: 最終 cosine similarity 下限（SFace 經驗：同人 > 0.363）
+
+    回傳: (filtered_mat, kept_indices, rejected_indices)
+    """
+    N = mat.shape[0]
+    if N <= 5:
+        return mat, list(range(N)), []
+
+    min_n = max(3, int(N * min_keep_ratio))
+
+    # Pass 1: 粗濾（percentile based）
+    c1 = mat.mean(axis=0); c1 = c1 / (np.linalg.norm(c1) + 1e-9)
+    sims1 = mat @ c1
+    if N >= 20:
+        p20 = float(np.percentile(sims1, 20))
+        # 丟掉 < p20 或 < 0.20（清楚的極端 outlier）裡比較寬鬆的那個
+        thr1 = min(p20, 0.20)
+    else:
+        thr1 = 0.15  # 資料少，標準放寬
+    mask1 = sims1 >= thr1
+    if int(mask1.sum()) < min_n:
+        order = np.argsort(-sims1)
+        mask1 = np.zeros(N, dtype=bool)
+        mask1[order[:min_n]] = True
+
+    # Pass 2: 細濾（refined centroid + 硬門檻）
+    c2 = mat[mask1].mean(axis=0); c2 = c2 / (np.linalg.norm(c2) + 1e-9)
+    sims2 = mat @ c2
+    mask2 = sims2 >= inlier_threshold
+    if int(mask2.sum()) < min_n:
+        order = np.argsort(-sims2)
+        mask2 = np.zeros(N, dtype=bool)
+        mask2[order[:min_n]] = True
+
+    kept = list(np.where(mask2)[0])
+    rejected = list(np.where(~mask2)[0])
+    return mat[mask2], kept, rejected
+
+
+def _photo_dir_fingerprint(photo_dir):
+    """回傳 (count, max_mtime) 用來判斷 cache 是否過期。
+    只看主要圖片副檔名，忽略 hidden 檔（.face_embeddings.* 等）。"""
+    import glob as _glob
+    exts = ["*.jpg", "*.jpeg", "*.png", "*.webp"]
+    files = []
+    for ext in exts:
+        files.extend(_glob.glob(os.path.join(photo_dir, ext)))
+    if not files:
+        return 0, 0.0
+    mt = 0.0
+    for fp in files:
+        try:
+            m = os.path.getmtime(fp)
+            if m > mt: mt = m
+        except OSError:
+            pass
+    return len(files), mt
+
+
 def _build_reference_embeddings(person_name, progress_cb=None):
-    """從已下載照片建立人臉特徵向量"""
+    """從已下載照片建立人臉特徵向量。
+
+    Cache 失效規則（2026-04-23 新增）：
+      - .face_embeddings.npy 旁邊存 .face_embeddings.meta.json
+      - meta 記錄 build 時的 (photo_count, max_mtime, max_ref_photos)
+      - 若任何欄位跟現況不符 → 強制 rebuild（新增/刪除/替換照片皆會觸發）
+      - 缺 meta（舊 cache）→ 也 rebuild，確保一次遷移到新機制
+    """
     photo_dir = os.path.join(DOWNLOAD_ROOT, person_name)
     if not os.path.isdir(photo_dir):
         return None
 
-    # 檢查快取
-    cache_path = os.path.join(photo_dir, f".face_embeddings.npy")
-    if os.path.isfile(cache_path):
-        return np.load(cache_path)
+    cache_path = os.path.join(photo_dir, ".face_embeddings.npy")
+    meta_path  = os.path.join(photo_dir, ".face_embeddings.meta.json")
+    max_photos = EXTRACT_CONFIG["max_ref_photos"]
+
+    cur_count, cur_mtime = _photo_dir_fingerprint(photo_dir)
+
+    # ── 檢查 cache + meta 一致性 ──
+    #   model_id 檢查：SFace ↔ ArcFace 切換時會強制 rebuild，避免 128-D/512-D 混用
+    if os.path.isfile(cache_path) and os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            cached_model = meta.get("model_id", "sface")  # 舊 cache 沒這欄 → 當 sface
+            if (meta.get("count") == cur_count
+                    and abs(float(meta.get("max_mtime", 0)) - cur_mtime) < 1e-3
+                    and meta.get("max_ref_photos") == max_photos
+                    and cached_model == _FACE_MODEL_ID):
+                return np.load(cache_path)
+            else:
+                logging.info(
+                    f"[emb-cache] {person_name} stale "
+                    f"(count {meta.get('count')}→{cur_count}, "
+                    f"mtime {meta.get('max_mtime')}→{cur_mtime}, "
+                    f"cap {meta.get('max_ref_photos')}→{max_photos}, "
+                    f"model {cached_model}→{_FACE_MODEL_ID}), rebuilding"
+                )
+        except Exception as e:
+            logging.warning(f"[emb-cache] {person_name} meta read failed: {e}, rebuilding")
 
     import glob as _glob
     import random as _random
@@ -3119,17 +3982,18 @@ def _build_reference_embeddings(person_name, progress_cb=None):
     if not files:
         return None
 
-    max_photos = EXTRACT_CONFIG["max_ref_photos"]
     if len(files) > max_photos:
         _random.shuffle(files)
         files = files[:max_photos]
 
     detector, recognizer = _build_face_models()
     embeddings = []
+    emb_files = []  # 與 embeddings 平行的檔名，供 outlier filter 記錄
+    fiqa_rejected = 0  # Tier 2 #4：被 FIQA 淘汰的張數
 
     for i, fpath in enumerate(files):
         try:
-            img = cv2.imread(fpath)
+            img = _cv_imread_unicode(fpath)
             if img is None:
                 continue
             h, w = img.shape[:2]
@@ -3141,8 +4005,13 @@ def _build_reference_embeddings(person_name, progress_cb=None):
             areas = [f[2] * f[3] for f in faces]
             best = faces[int(np.argmax(areas))]
             aligned = recognizer.alignCrop(img, best)
+            # Tier 2 #4：參考照 pipeline 加 FIQA 濾網，把模糊/過暗/過曝的臉擋掉
+            if not _pass_fiqa(aligned):
+                fiqa_rejected += 1
+                continue
             emb = recognizer.feature(aligned)
             embeddings.append(emb.flatten())
+            emb_files.append(fpath)
         except Exception:
             continue
         if progress_cb and i % 10 == 0:
@@ -3156,7 +4025,76 @@ def _build_reference_embeddings(person_name, progress_cb=None):
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
     norms[norms == 0] = 1
     mat = mat / norms
+    raw_rows = int(mat.shape[0])
+
+    # ── 自我一致性過濾：丟掉 outlier embeddings（污染照片） ──
+    mat_filtered, keep_idx, reject_idx = _filter_outlier_embeddings(mat)
+    rejected_files = [os.path.basename(emb_files[i]) for i in reject_idx]
+    if reject_idx:
+        logging.info(
+            f"[emb-filter] {person_name}: kept {len(keep_idx)}/{raw_rows}, "
+            f"rejected {len(reject_idx)} outlier photos"
+        )
+    mat = mat_filtered
+
+    # 保底：過濾後 < 3 筆就回傳 None（trigger 失敗路徑）
+    if mat.shape[0] < 3:
+        logging.warning(
+            f"[emb-filter] {person_name}: after filter only {mat.shape[0]} embs left, abort"
+        )
+        return None
+
     np.save(cache_path, mat)
+
+    # 寫 paired filename list（Tier 1 #2 HDBSCAN audit 用）：
+    # embeddings 第 i 行對應 kept_files[i]。沒有 meta_path 旁的 .npy 重建時會再刷新。
+    kept_files = [os.path.basename(emb_files[i]) for i in keep_idx]
+    files_path = os.path.join(photo_dir, ".face_embeddings.files.json")
+    try:
+        with open(files_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "model_id": _FACE_MODEL_ID,
+                "built_at": time.time(),
+                "files": kept_files,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning(f"[emb-cache] {person_name} files.json write failed: {e}")
+
+    # 寫 meta（用全目錄 fingerprint，不是 sampled）
+    try:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "count": cur_count,
+                "max_mtime": cur_mtime,
+                "max_ref_photos": max_photos,
+                "built_at": time.time(),
+                "embeddings_raw_rows": raw_rows,
+                "embeddings_kept_rows": int(mat.shape[0]),
+                "embeddings_rejected_rows": len(reject_idx),
+                "fiqa_rejected": fiqa_rejected,
+                "model_id": _FACE_MODEL_ID,
+                "emb_dim": int(mat.shape[1]),
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning(f"[emb-cache] {person_name} meta write failed: {e}")
+
+    # 寫 review 側檔：記錄被排除的檔名，給 dashboard 顯示（不動原檔）
+    review_path = os.path.join(photo_dir, ".face_embeddings.review.json")
+    try:
+        with open(review_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "generated_at": time.time(),
+                "sampled": len(files),
+                "had_face": raw_rows,
+                "kept": int(mat.shape[0]),
+                "rejected": len(reject_idx),
+                "rejected_files": rejected_files,
+                "fiqa_rejected": fiqa_rejected,
+                "model_id": _FACE_MODEL_ID,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning(f"[emb-review] {person_name} review write failed: {e}")
+
     return mat
 
 
@@ -3172,8 +4110,9 @@ def _build_neg_embeddings(person_name):
     photo_dir = os.path.join(DOWNLOAD_ROOT, person_name, ".negatives")
 
     # ── 方案 1：手動 .negatives/ 資料夾 ──
+    #   cache 檔名帶 model_id → SFace/ArcFace 不會撞到（128-D vs 512-D）
     if os.path.isdir(photo_dir):
-        cache_path = os.path.join(photo_dir, ".neg_embeddings.npy")
+        cache_path = os.path.join(photo_dir, f".neg_embeddings.{_FACE_MODEL_ID}.npy")
         if os.path.isfile(cache_path):
             try:
                 return np.load(cache_path)
@@ -3196,7 +4135,7 @@ def _build_neg_embeddings(person_name):
             embeddings = []
             for fpath in files:
                 try:
-                    img = cv2.imread(fpath)
+                    img = _cv_imread_unicode(fpath)
                     if img is None:
                         continue
                     h, w = img.shape[:2]
@@ -3207,6 +4146,8 @@ def _build_neg_embeddings(person_name):
                     areas = [f[2] * f[3] for f in faces]
                     best = faces[int(np.argmax(areas))]
                     aligned = recognizer.alignCrop(img, best)
+                    if not _pass_fiqa(aligned):
+                        continue
                     emb = recognizer.feature(aligned).flatten()
                     embeddings.append(emb)
                 except Exception:
@@ -3225,6 +4166,8 @@ def _build_neg_embeddings(person_name):
 
     # ── 方案 2：自動從 sibling 人物資料夾收集 ──
     # 把 DOWNLOAD_ROOT 下其他人物的已快取 .face_embeddings.npy 合併成反參考
+    # 2026-04-23：加上 dim-safety — 只收跟目前 _FACE_EMB_DIM 相符的 cache，
+    # 避免 SFace (128-D) / ArcFace (512-D) 過渡期 vstack 崩潰
     try:
         all_neg = []
         person_lower = person_name.lower()
@@ -3235,7 +4178,7 @@ def _build_neg_embeddings(person_name):
             if os.path.isfile(sibling_emb):
                 try:
                     mat = np.load(sibling_emb)
-                    if mat.ndim == 2 and mat.shape[0] >= 3:
+                    if mat.ndim == 2 and mat.shape[0] >= 3 and mat.shape[1] == _FACE_EMB_DIM:
                         # 每個 sibling 最多取 10 張，避免反參考過大
                         if mat.shape[0] > 10:
                             idx = np.random.choice(mat.shape[0], 10, replace=False)
@@ -3255,6 +4198,213 @@ def _build_neg_embeddings(person_name):
         pass
 
     return None
+
+
+# ──────────────────────────────────────────────────────────
+#  HDBSCAN mixed-folder audit — Tier 1 #2 (2026-04-23)
+#  偵測某人資料夾裡面是不是混了別人（scraper 爬錯、手動混放）
+# ──────────────────────────────────────────────────────────
+def _audit_folder_clusters(person_name, min_cluster_size=5, force_rebuild=False):
+    """檢查資料夾內部的 embedding 結構，偵測「是不是混了別人」。
+
+    2026-04-23 修訂：原本只跑 HDBSCAN 判定 mixed，但實測 HDBSCAN 對
+    「均勻分布的單一身份」（乾淨資料夾）會判成全 noise，會漏掉真正的乾淨情況。
+    新版改用三道訊號組合：
+
+      1. Pairwise cosine similarity 統計（mean / std / p5 / p95）
+         - 乾淨資料夾：mean 高 (~0.4+)、p5 也夠高 (~0.2+)、std 窄
+         - 混人資料夾：std 寬、p5 很低 (< 0.1)，因為存在「cross-person pair」
+         - 「壞」資料夾（每張都不同人）：mean < 0.15，整批參考不可用
+      2. KMeans(k=2) + silhouette_score
+         - silhouette >= 0.30 且較小 cluster 占 >= 10% → 確認是 bimodal → mixed
+         - 否則 → 視為單一身份
+      3. HDBSCAN(leaf) 輔助視覺化（當 silhouette 判為 mixed 時可顯示 example files）
+
+    Returns dict（失敗時回 {"ok": False, "reason": ...}）:
+      {
+        "ok": True, "person", "model_id", "n_photos",
+        "sim_stats": {"mean", "std", "p5", "p95"},
+        "verdict": "clean" | "mixed" | "broken" | "unclear",
+        "verdict_reason": str,
+        "silhouette": float,
+        "dominant_fraction": float,   # 最大 cluster / n_photos
+        "is_mixed": bool,             # verdict == "mixed"
+        "clusters": [ {label, size, fraction, cohesion, example_files:[...]}, ... ],
+      }
+    """
+    photo_dir = os.path.join(DOWNLOAD_ROOT, person_name)
+    if not os.path.isdir(photo_dir):
+        return {"ok": False, "reason": "folder not found"}
+
+    cache_path = os.path.join(photo_dir, ".face_embeddings.npy")
+    files_path = os.path.join(photo_dir, ".face_embeddings.files.json")
+
+    # 沒 cache 或沒檔名清單：rebuild 一次
+    need_rebuild = force_rebuild or not os.path.isfile(cache_path) or not os.path.isfile(files_path)
+    if need_rebuild:
+        if os.path.isfile(cache_path) and not os.path.isfile(files_path):
+            try: os.remove(os.path.join(photo_dir, ".face_embeddings.meta.json"))
+            except Exception: pass
+        _build_reference_embeddings(person_name)
+        if not os.path.isfile(cache_path) or not os.path.isfile(files_path):
+            return {"ok": False, "reason": "rebuild failed"}
+
+    try:
+        mat = np.load(cache_path)
+    except Exception as e:
+        return {"ok": False, "reason": f"load failed: {e}"}
+    if mat.ndim != 2 or mat.shape[0] < 6:
+        return {"ok": False, "reason": f"insufficient embeddings ({mat.shape[0]} rows)"}
+
+    try:
+        with open(files_path, "r", encoding="utf-8") as f:
+            files_meta = json.load(f)
+        files = files_meta.get("files", [])
+        if len(files) != mat.shape[0]:
+            return {"ok": False, "reason":
+                    f"files.json out of sync ({len(files)} names vs {mat.shape[0]} embs); "
+                    f"?force=1 可修復"}
+    except Exception as e:
+        return {"ok": False, "reason": f"files.json read failed: {e}"}
+
+    model_id = files_meta.get("model_id") or _FACE_MODEL_ID
+
+    # 確保 L2-normalized
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    M = mat / norms
+    n = int(M.shape[0])
+
+    # ── 訊號 1：pairwise sim 統計 ──
+    S = M @ M.T
+    iu = np.triu_indices(n, k=1)
+    vals = S[iu]
+    s_mean = float(vals.mean())
+    s_std  = float(vals.std())
+    s_p5   = float(np.percentile(vals, 5))
+    s_p95  = float(np.percentile(vals, 95))
+
+    # ── 訊號 2：KMeans(k=2) + silhouette（always run）──
+    silhouette = None
+    km_labels = np.zeros(n, dtype=int)
+    try:
+        from sklearn.cluster import KMeans
+        from sklearn.metrics import silhouette_score
+        if n >= 6:
+            # n_init='auto' 自 sklearn 1.4 起可用；放 2 比較保守
+            km = KMeans(n_clusters=2, n_init=5, random_state=0)
+            km_labels = km.fit_predict(M)
+            # 只有兩邊都至少 2 個才算 silhouette
+            u, c = np.unique(km_labels, return_counts=True)
+            if len(u) == 2 and min(c) >= 2:
+                # silhouette 用 cosine 相似度距離
+                D = 1.0 - S
+                np.fill_diagonal(D, 0.0)
+                D = np.clip(D, 0.0, 2.0)
+                try:
+                    silhouette = float(silhouette_score(D, km_labels, metric="precomputed"))
+                except Exception:
+                    silhouette = None
+    except Exception as e:
+        logging.warning(f"[audit] KMeans/silhouette failed: {e}")
+
+    # ── 綜合判定 ──
+    # 定義閾值（base on sanity test 觀察的 ArcFace 分佈）
+    CLEAN_MEAN = 0.30
+    CLEAN_P5   = 0.15
+    BROKEN_MEAN = 0.15
+    SIL_THRESH  = 0.15     # silhouette >= 0.15 表示兩 cluster 確實有分離
+    MIN_SECOND  = 0.10
+
+    verdict = "unclear"
+    reason = ""
+
+    # 依 km_labels 計算兩 cluster size（for mixed 判定）
+    u, c = np.unique(km_labels, return_counts=True)
+    smaller_size = int(min(c)) if len(u) == 2 else n
+    smaller_frac = smaller_size / n
+
+    if s_mean < BROKEN_MEAN:
+        verdict = "broken"
+        reason = f"mean sim={s_mean:.2f} < {BROKEN_MEAN}，本人照片彼此都不像，參考可能整批錯人"
+    elif (silhouette is not None and silhouette >= SIL_THRESH
+            and smaller_frac >= MIN_SECOND
+            and s_p5 < CLEAN_P5):
+        verdict = "mixed"
+        reason = (f"silhouette={silhouette:.2f}>={SIL_THRESH}, "
+                  f"smaller cluster={smaller_frac*100:.0f}%, p5={s_p5:.2f}"
+                  f" → 兩群明顯分離")
+    elif s_mean >= CLEAN_MEAN and s_p5 >= CLEAN_P5:
+        verdict = "clean"
+        reason = f"mean={s_mean:.2f}, p5={s_p5:.2f} → 單一身份"
+    else:
+        verdict = "unclear"
+        sil_str = f"{silhouette:.2f}" if silhouette is not None else "n/a"
+        reason = (f"mean={s_mean:.2f}, p5={s_p5:.2f}, silhouette={sil_str}")
+
+    # ── 組出 clusters 顯示：mixed 時用 km_labels，其他視為單一 cluster ──
+    clusters = []
+    if verdict == "mixed":
+        label_values = sorted(set(km_labels.tolist()))
+        for lbl in label_values:
+            idx = np.where(km_labels == lbl)[0]
+            if len(idx) == 0: continue
+            sub = M[idx]
+            if len(idx) > 1:
+                S_sub = sub @ sub.T
+                iu_sub = np.triu_indices(len(idx), k=1)
+                cohesion = float(S_sub[iu_sub].mean())
+            else:
+                cohesion = 1.0
+            centroid = sub.mean(axis=0)
+            centroid /= (np.linalg.norm(centroid) + 1e-9)
+            dists = 1.0 - (sub @ centroid)
+            order = np.argsort(dists)
+            examples = [files[int(idx[k])] for k in order[:6]]
+            clusters.append({
+                "label": int(lbl),
+                "size": int(len(idx)),
+                "fraction": float(len(idx) / n),
+                "cohesion": round(cohesion, 4),
+                "example_files": examples,
+            })
+        clusters.sort(key=lambda c: c["size"], reverse=True)
+    else:
+        # 單一 cluster：全部放進 cluster 0，example 用離 centroid 最近的 6 張
+        centroid = M.mean(axis=0)
+        centroid /= (np.linalg.norm(centroid) + 1e-9)
+        dists = 1.0 - (M @ centroid)
+        order = np.argsort(dists)
+        examples = [files[int(k)] for k in order[:6]]
+        clusters.append({
+            "label": 0,
+            "size": n,
+            "fraction": 1.0,
+            "cohesion": round(s_mean, 4),
+            "example_files": examples,
+        })
+
+    dominant_fraction = clusters[0]["fraction"] if clusters else 0.0
+
+    return {
+        "ok": True,
+        "person": person_name,
+        "model_id": model_id,
+        "n_photos": n,
+        "sim_stats": {
+            "mean": round(s_mean, 4),
+            "std":  round(s_std, 4),
+            "p5":   round(s_p5, 4),
+            "p95":  round(s_p95, 4),
+        },
+        "silhouette": round(silhouette, 4) if silhouette is not None else None,
+        "verdict": verdict,
+        "verdict_reason": reason,
+        "dominant_fraction": round(dominant_fraction, 4),
+        "is_mixed": (verdict == "mixed"),
+        "n_clusters": len(clusters),
+        "clusters": clusters,
+    }
 
 
 # 反參考門檻：目標分數必須比最接近的反參考至少高出這個值才算通過
@@ -3974,6 +5124,541 @@ def _snap_cut_to_quiet(audio_energy, t_sec, window_sec=1.0):
     return float(lo + min_idx)
 
 
+# ── 節拍對齊：偵測音訊 onset（鼓點/強音） ──
+_ONSET_CACHE = {}
+
+
+def _extract_onset_times(video_path, hop_sec=0.05):
+    """
+    從影片音訊抽取 onset（節拍/強音起點）時刻列表。
+    hop_sec=0.05 → 20Hz 解析度，足以分辨 250 BPM 以下的節拍。
+    回傳 np.ndarray[float] 秒數；失敗回傳 None。
+    """
+    cached = _ONSET_CACHE.get(video_path)
+    if cached is not None:
+        return cached
+    try:
+        import subprocess as _sp
+        ffmpeg = _get_ffmpeg()
+        cmd = [ffmpeg, "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
+               "-f", "s16le", "-hide_banner", "-loglevel", "error", "-"]
+        proc = _sp.run(cmd, capture_output=True, timeout=180)
+        if proc.returncode != 0 or not proc.stdout:
+            _ONSET_CACHE[video_path] = None
+            return None
+        samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+        sr = 16000
+        hop = max(1, int(sr * hop_sec))
+        win = hop * 2  # 0.1s window
+        if len(samples) < win:
+            _ONSET_CACHE[video_path] = None
+            return None
+        num = (len(samples) - win) // hop + 1
+        # RMS envelope
+        env = np.empty(num, dtype=np.float32)
+        for i in range(num):
+            s = i * hop
+            env[i] = np.sqrt(np.mean(samples[s:s + win] ** 2))
+        # Onset strength = positive gradient (rising energy)
+        diff = np.diff(env, prepend=env[0])
+        strength = np.maximum(diff, 0)
+        if strength.max() <= 0:
+            _ONSET_CACHE[video_path] = None
+            return None
+        # Normalize & peak-pick
+        strength /= strength.max()
+        try:
+            from scipy.signal import find_peaks
+            # min peak height = 0.15, min distance = 0.15s (< 400BPM)
+            min_dist = max(1, int(0.15 / hop_sec))
+            peaks, _ = find_peaks(strength, height=0.15, distance=min_dist)
+        except Exception:
+            # fallback: simple local max
+            peaks = []
+            for i in range(1, len(strength) - 1):
+                if strength[i] > 0.15 and strength[i] >= strength[i - 1] and strength[i] >= strength[i + 1]:
+                    peaks.append(i)
+            peaks = np.array(peaks, dtype=np.int64)
+        if len(peaks) == 0:
+            _ONSET_CACHE[video_path] = None
+            return None
+        onset_times = peaks.astype(np.float32) * hop_sec
+        _ONSET_CACHE[video_path] = onset_times
+        return onset_times
+    except Exception as e:
+        logging.warning(f"onset extract failed for {video_path}: {e}")
+        _ONSET_CACHE[video_path] = None
+        return None
+
+
+def _snap_cut_to_beat(onset_times, t_sec, window_sec=1.5):
+    """
+    把切點對齊到 ±window_sec 內最近的 onset（鼓點/強音起點）。
+    找不到合適 onset 時回傳 None — 呼叫端可退回 quiet-snap。
+    """
+    if onset_times is None or len(onset_times) == 0:
+        return None
+    lo = t_sec - window_sec
+    hi = t_sec + window_sec
+    mask = (onset_times >= lo) & (onset_times <= hi)
+    candidates = onset_times[mask]
+    if len(candidates) == 0:
+        return None
+    idx = int(np.argmin(np.abs(candidates - t_sec)))
+    return float(candidates[idx])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wave 1 / 2 helpers — shot boundary, BGM beat, target-face ratio, blur/shake
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SCENE_BOUNDARY_CACHE = {}
+
+try:
+    import scenedetect as _scenedetect_mod  # noqa: F401
+    HAS_SCENEDETECT = True
+except Exception:
+    HAS_SCENEDETECT = False
+
+
+def _detect_scene_boundaries(video_path, threshold=27.0, min_scene_len_sec=0.6):
+    """
+    用 PySceneDetect 找出影片的 shot boundaries（鏡頭切換時間點）。
+    回傳 np.ndarray[float] 秒數；失敗或未安裝 → None。
+    使用 ContentDetector（對舞台/fancam 中強烈色調變化最敏感），
+    AdaptiveDetector 對「內部閃光燈/舞台燈光」較魯棒，兩者擇一。
+    """
+    if not HAS_SCENEDETECT:
+        return None
+    cached = _SCENE_BOUNDARY_CACHE.get(video_path)
+    if cached is not None:
+        return cached if len(cached) else None
+
+    # 嘗試從 video scan cache 讀
+    try:
+        cache = _load_video_cache(video_path)
+        if cache and "shot_boundaries" in cache:
+            arr = np.asarray(cache["shot_boundaries"], dtype=np.float32)
+            _SCENE_BOUNDARY_CACHE[video_path] = arr
+            return arr if len(arr) else None
+    except Exception:
+        pass
+
+    try:
+        from scenedetect import SceneManager, open_video, ContentDetector
+        video = open_video(video_path)
+        sm = SceneManager()
+        sm.add_detector(ContentDetector(threshold=threshold,
+                                         min_scene_len=int(min_scene_len_sec * 24)))
+        sm.detect_scenes(video=video, show_progress=False)
+        scenes = sm.get_scene_list()
+        # scene_list: list of (start_tc, end_tc). 我們收集所有 scene 起點（除了第 0 個 = 0s）
+        # 以及最後一個 scene 的終點（做為尾邊界）
+        boundaries = []
+        for i, (start_tc, end_tc) in enumerate(scenes):
+            t = start_tc.get_seconds()
+            if i > 0:  # 第 0 個是影片開頭，不算 shot boundary
+                boundaries.append(t)
+        if boundaries and scenes:
+            boundaries.append(scenes[-1][1].get_seconds())
+        arr = np.array(sorted(set(boundaries)), dtype=np.float32)
+        _SCENE_BOUNDARY_CACHE[video_path] = arr
+        try:
+            _save_video_cache(video_path, {"shot_boundaries": arr.tolist()})
+        except Exception:
+            pass
+        return arr if len(arr) else None
+    except Exception as e:
+        logging.warning(f"scene detect failed for {os.path.basename(video_path)}: {e}")
+        _SCENE_BOUNDARY_CACHE[video_path] = np.array([], dtype=np.float32)
+        return None
+
+
+def _snap_cut_to_shot_boundary(boundaries, t_sec, clip_dur, window_sec=0.6,
+                                usable_end=None):
+    """
+    把切點對齊到 ±window_sec 內最近的 shot boundary（鏡頭切換點）。
+    - clip_dur：片段長度；用於檢查新切點 + clip_dur 是否仍落在可用範圍內
+    - usable_end：片段結束上限；預設為 None (不檢查)
+    - 回傳新 t_sec（float）或 None（沒合適邊界）
+    """
+    if boundaries is None or len(boundaries) == 0:
+        return None
+    lo = t_sec - window_sec
+    hi = t_sec + window_sec
+    mask = (boundaries >= lo) & (boundaries <= hi)
+    cand = boundaries[mask]
+    if len(cand) == 0:
+        return None
+    idx = int(np.argmin(np.abs(cand - t_sec)))
+    new_t = float(cand[idx])
+    if new_t < 0:
+        return None
+    if usable_end is not None and (new_t + clip_dur > usable_end):
+        return None
+    return new_t
+
+
+def _extract_onset_times_from_audio(audio_path, hop_sec=0.05):
+    """
+    從獨立音訊檔（BGM wav/mp3/flac）抽取 onset。邏輯跟 _extract_onset_times 相同，
+    只是來源是音檔而非影片。結果快取在全域 _ONSET_CACHE（key 為 audio_path）。
+    """
+    cached = _ONSET_CACHE.get(audio_path)
+    if cached is not None:
+        return cached
+    try:
+        import subprocess as _sp
+        ffmpeg = _get_ffmpeg()
+        cmd = [ffmpeg, "-i", audio_path, "-vn", "-ac", "1", "-ar", "16000",
+               "-f", "s16le", "-hide_banner", "-loglevel", "error", "-"]
+        proc = _sp.run(cmd, capture_output=True, timeout=180)
+        if proc.returncode != 0 or not proc.stdout:
+            _ONSET_CACHE[audio_path] = None
+            return None
+        samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+        sr = 16000
+        hop = max(1, int(sr * hop_sec))
+        win = hop * 2
+        if len(samples) < win:
+            _ONSET_CACHE[audio_path] = None
+            return None
+        num = (len(samples) - win) // hop + 1
+        env = np.empty(num, dtype=np.float32)
+        for i in range(num):
+            s = i * hop
+            env[i] = np.sqrt(np.mean(samples[s:s + win] ** 2))
+        diff = np.diff(env, prepend=env[0])
+        strength = np.maximum(diff, 0)
+        if strength.max() <= 0:
+            _ONSET_CACHE[audio_path] = None
+            return None
+        strength /= strength.max()
+        try:
+            from scipy.signal import find_peaks
+            min_dist = max(1, int(0.15 / hop_sec))
+            peaks, _ = find_peaks(strength, height=0.15, distance=min_dist)
+        except Exception:
+            peaks = []
+            for i in range(1, len(strength) - 1):
+                if (strength[i] > 0.15 and strength[i] >= strength[i - 1]
+                        and strength[i] >= strength[i + 1]):
+                    peaks.append(i)
+            peaks = np.array(peaks, dtype=np.int64)
+        if len(peaks) == 0:
+            _ONSET_CACHE[audio_path] = None
+            return None
+        onset_times = peaks.astype(np.float32) * hop_sec
+        _ONSET_CACHE[audio_path] = onset_times
+        return onset_times
+    except Exception as e:
+        logging.warning(f"bgm onset extract failed for {os.path.basename(audio_path)}: {e}")
+        _ONSET_CACHE[audio_path] = None
+        return None
+
+
+def _analyze_bgm_energy(bgm_path, hop_sec=1.0, win_sec=2.0):
+    """Wave 4 E1: 回傳 BGM 時間-能量（RMS）曲線，用來偵測 chorus（高能量區）。
+
+    回傳 (times_array, energy_array_normalized)，失敗回 (None, None)。
+    energy 以 95 百分位做正規化，chorus 通常 > 0.75，verse 通常 < 0.5。
+    """
+    try:
+        import subprocess as _sp
+        ffmpeg = _get_ffmpeg()
+        cmd = [ffmpeg, "-i", bgm_path, "-vn", "-ac", "1", "-ar", "16000",
+               "-f", "s16le", "-hide_banner", "-loglevel", "error", "-"]
+        proc = _sp.run(cmd, capture_output=True, timeout=180)
+        if proc.returncode != 0 or not proc.stdout:
+            return None, None
+        samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+        sr = 16000
+        hop = max(1, int(sr * hop_sec))
+        win = max(hop * 2, int(sr * win_sec))
+        if len(samples) < win:
+            return None, None
+        num = (len(samples) - win) // hop + 1
+        energy = np.empty(num, dtype=np.float32)
+        for i in range(num):
+            s = i * hop
+            energy[i] = float(np.sqrt(np.mean(samples[s:s + win] ** 2)))
+        # 用 95 百分位 (robust to peaks) 正規化到 [0,1.2]
+        p95 = float(np.percentile(energy, 95))
+        if p95 > 0:
+            energy = np.clip(energy / p95, 0, 1.2).astype(np.float32)
+        times = (np.arange(num, dtype=np.float32) * hop_sec + win_sec / 2).astype(np.float32)
+        return times, energy
+    except Exception as e:
+        logging.warning(f"bgm energy analysis failed: {e}")
+        return None, None
+
+
+def _bgm_energy_at(times, energy, t):
+    """查詢時間 t 處的 BGM 能量值（插值）；越界回 0.5（中性）。"""
+    if times is None or energy is None or len(times) == 0:
+        return 0.5
+    if t <= times[0]:
+        return float(energy[0])
+    if t >= times[-1]:
+        return float(energy[-1])
+    i = int(np.searchsorted(times, t))
+    i = max(1, min(len(times) - 1, i))
+    t0, t1 = float(times[i - 1]), float(times[i])
+    e0, e1 = float(energy[i - 1]), float(energy[i])
+    if t1 == t0:
+        return e0
+    r = (t - t0) / (t1 - t0)
+    return e0 + (e1 - e0) * r
+
+
+def _extract_bgm_beat_grid(bgm_path, target_clip_dur=3.0):
+    """
+    為 BGM 計算「切點網格」：每個 clip 的目標長度應該吻合的時間點。
+    做法：抽 onset，然後尋找主 BPM（onset 間距的眾數），把時間線切成
+    downbeat 節拍（每 4 拍）。回傳：
+      - beat_times: np.ndarray 拍點時間（秒）
+      - downbeat_times: np.ndarray 每 4 拍 (downbeat)
+      - bpm: float
+      - intervals: np.ndarray 相鄰 downbeat 間距
+    失敗回傳 (None, None, None, None)。
+    """
+    onsets = _extract_onset_times_from_audio(bgm_path)
+    if onsets is None or len(onsets) < 4:
+        return None, None, None, None
+
+    # 找主 beat 間距：取 onset 相鄰差的中位數
+    diffs = np.diff(onsets)
+    # 過濾過短（雙擊）/ 過長的間距
+    diffs = diffs[(diffs > 0.15) & (diffs < 1.5)]
+    if len(diffs) == 0:
+        return None, None, None, None
+    # 眾數比中位數更穩：把差值 bin 到 0.02 秒
+    bins = np.round(diffs / 0.02).astype(np.int32)
+    uniq, cnt = np.unique(bins, return_counts=True)
+    beat_interval = float(uniq[int(np.argmax(cnt))]) * 0.02
+    beat_interval = max(0.3, min(1.2, beat_interval))  # 50~200 BPM
+    bpm = 60.0 / beat_interval
+
+    # 以 onset[0] 為 phase 0，生成 beat grid
+    if len(onsets) == 0:
+        return None, None, None, None
+    t0 = float(onsets[0])
+    # BGM 總長（從音檔取）
+    try:
+        dur = _probe_duration(_get_ffmpeg(), bgm_path)
+    except Exception:
+        dur = None
+    end_t = dur if dur and dur > t0 + beat_interval else (onsets[-1] + beat_interval * 4)
+    beat_times = np.arange(t0, end_t, beat_interval, dtype=np.float32)
+
+    # downbeat：每 4 拍一個
+    downbeat_times = beat_times[::4]
+
+    # downbeat 間距（用來決定 clip 長度）
+    # 目標 clip duration 對應幾拍？
+    beats_per_clip = max(1, int(round(target_clip_dur / beat_interval)))
+    # 讓 clip 長度落在 beats_per_clip 的整數倍
+    cut_grid = beat_times[::beats_per_clip]
+
+    logging.info(f"bgm beat grid: bpm={bpm:.1f}, beat={beat_interval:.3f}s, "
+                 f"beats_per_clip={beats_per_clip}, {len(cut_grid)} cut points")
+    return beat_times, cut_grid, bpm, beats_per_clip
+
+
+# ── Target-face presence （A3）──
+def _measure_clip_target_face_ratio(video_path, t_start, dur, ref_embeddings,
+                                     neg_embeddings=None, sample_hz=2.0):
+    """
+    密集抽樣檢查「clip 內目標人物出現率」。
+    - sample_hz=2.0 → 每 0.5 秒取一幀
+    - 回傳 ratio ∈ [0, 1]，失敗回 None（呼叫端可保守認為 OK）
+    """
+    if ref_embeddings is None or len(ref_embeddings) == 0:
+        return None
+    try:
+        detector, recognizer = _build_face_models()
+        if detector is None or recognizer is None:
+            return None
+    except Exception:
+        return None
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+
+    try:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if w <= 0 or h <= 0:
+            return None
+        detector.setInputSize((w, h))
+
+        thresh = EXTRACT_CONFIG["similarity_threshold"] * 0.90
+        n_samples = max(3, int(round(dur * sample_hz)))
+        hits = 0
+        for i in range(n_samples):
+            t = t_start + (dur * (i + 0.5) / n_samples)
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            _, faces = detector.detect(frame)
+            if faces is None or len(faces) == 0:
+                continue
+            # 取最大臉
+            faces_sorted = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+            matched = False
+            for f in faces_sorted[:3]:  # 最多檢查前 3 大臉，避免小臉路人
+                try:
+                    aligned = recognizer.alignCrop(frame, f)
+                    emb = recognizer.feature(aligned).flatten()
+                    nrm = np.linalg.norm(emb)
+                    if nrm > 0:
+                        emb = emb / nrm
+                    sims = ref_embeddings @ emb
+                    max_sim = float(np.max(sims))
+                    if max_sim >= thresh and _passes_negative_check(
+                            emb, ref_embeddings, neg_embeddings, max_sim):
+                        matched = True
+                        break
+                except Exception:
+                    continue
+            if matched:
+                hits += 1
+        return float(hits) / n_samples if n_samples > 0 else 0.0
+    finally:
+        cap.release()
+
+
+# ── Per-clip motion quality （A4）──
+def _measure_clip_motion_quality(video_path, t_start, dur, sample_hz=4.0):
+    """
+    量測 clip 的清晰度與手震等級。
+    - sharpness: 所有採樣幀的 Laplacian variance 中位數（越大越銳利；< 40 ≈ 糊）
+    - shake: 相鄰採樣幀 dense optical flow 的平均幅度（越大越晃；正常 < 3，手震 > 6）
+    回傳 (sharpness, shake) 或 (None, None)。
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None, None
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        n = max(3, int(round(dur * sample_hz)))
+        grays = []
+        lap_vars = []
+        for i in range(n):
+            t = t_start + (dur * (i + 0.5) / n)
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # 縮小到 320px 寬度以加速（保持縱橫比）
+            _h, _w = g.shape[:2]
+            if _w > 320:
+                _sc = 320.0 / _w
+                g = cv2.resize(g, (320, int(_h * _sc)))
+            lap_vars.append(float(cv2.Laplacian(g, cv2.CV_64F).var()))
+            grays.append(g)
+
+        if len(lap_vars) == 0 or len(grays) < 2:
+            return None, None
+
+        sharpness = float(np.median(lap_vars))
+
+        # shake = mean magnitude of Farneback dense flow across consecutive samples
+        shake_mags = []
+        for i in range(len(grays) - 1):
+            try:
+                flow = cv2.calcOpticalFlowFarneback(
+                    grays[i], grays[i + 1], None,
+                    0.5, 2, 15, 2, 5, 1.2, 0)
+                mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+                shake_mags.append(float(np.mean(mag)))
+            except Exception:
+                continue
+        shake = float(np.median(shake_mags)) if shake_mags else 0.0
+        return sharpness, shake
+    finally:
+        cap.release()
+
+
+def _face_pose_smile_score(face):
+    """Wave 5 C2: 用 YuNet 5-pt landmarks 估算 pose + smile 分數，回傳 (pose, smile) ∈ [0,1]²。
+
+    YuNet 每張臉的 shape=[15]：
+        0-3   bbox (x,y,w,h)
+        4,5   右眼 (x,y)
+        6,7   左眼
+        8,9   鼻尖
+        10,11 右嘴角
+        12,13 左嘴角
+        14    信心
+    """
+    try:
+        fw = float(face[2]); fh = float(face[3])
+        if fw <= 1 or fh <= 1:
+            return 0.5, 0.3
+        rex, rey = float(face[4]), float(face[5])
+        lex, ley = float(face[6]), float(face[7])
+        nx, ny = float(face[8]), float(face[9])
+        rmx, rmy = float(face[10]), float(face[11])
+        lmx, lmy = float(face[12]), float(face[13])
+
+        # Pose: 正臉評分
+        # 1) 兩眼水平差（越小越正）
+        eye_dy = abs(ley - rey) / fh  # 0~
+        # 2) 鼻尖偏離雙眼中線
+        eye_cx = (lex + rex) / 2.0
+        nose_off = abs(nx - eye_cx) / max(1.0, fw)
+        # 3) 嘴巴中心也要靠近雙眼中線（避免側臉）
+        mouth_cx = (lmx + rmx) / 2.0
+        mouth_off = abs(mouth_cx - eye_cx) / max(1.0, fw)
+        # 綜合：每項轉 [0,1]（0=理想，越大越差）再相乘折扣
+        _p1 = max(0.0, 1.0 - eye_dy * 5.0)       # eye_dy > 0.2 → 0
+        _p2 = max(0.0, 1.0 - nose_off * 5.0)     # nose_off > 0.2 → 0
+        _p3 = max(0.0, 1.0 - mouth_off * 5.0)
+        pose = (_p1 * 0.3 + _p2 * 0.4 + _p3 * 0.3)
+        pose = max(0.0, min(1.0, pose))
+
+        # Smile: 嘴巴水平距離 / 臉寬
+        mouth_w = ((lmx - rmx) ** 2 + (lmy - rmy) ** 2) ** 0.5
+        mw_ratio = mouth_w / max(1.0, fw)
+        # 一般口 0.25~0.30；微笑 0.30~0.38；大笑 > 0.40
+        if mw_ratio <= 0.24:
+            smile = 0.0
+        elif mw_ratio >= 0.40:
+            smile = 1.0
+        else:
+            smile = (mw_ratio - 0.24) / 0.16
+        smile = max(0.0, min(1.0, smile))
+        return pose, smile
+    except Exception:
+        return 0.5, 0.3
+
+
+def _whole_body_face_score(face_area, frame_area):
+    """鐘形曲線：全身遠景（臉佔 ~2.5%）最高分，中景以上被壓分。
+    - < 0.5%：太遠，0 分
+    - 0.5% ~ 2.5%：升到 1.0（遠景全身）
+    - 2.5% ~ 5%：陡降到 0.7（半身）
+    - 5% ~ 10%：降到 0.4（胸上）
+    - > 10%：特寫，鎖在 0.2
+    """
+    if frame_area <= 0:
+        return 0.0
+    r = face_area / frame_area
+    if r < 0.005:
+        return 0.0
+    if r < 0.025:
+        return (r - 0.005) / 0.02
+    if r < 0.05:
+        return 1.0 - (r - 0.025) * 12.0
+    if r < 0.10:
+        return max(0.2, 0.7 - (r - 0.05) * 6.0)
+    return 0.2
+
+
 def _score_video_highlights(video_path, strategy, progress_cb=None,
                               ref_embeddings=None, neg_embeddings=None):
     """對影片每秒評分，找出精彩時刻。
@@ -4047,6 +5732,25 @@ def _score_video_highlights(video_path, strategy, progress_cb=None,
                 progress_cb(t / duration)
             continue
 
+        # 畫質懲罰係數（品質濾網）：太暗、過曝、太糊的片段扣分
+        # — 不直接跳過（避免把 clip 全體 0 分），而是乘在 combined 上
+        # 亮度：最佳在 80-180；邊界以線性衰減到 0.5 權重
+        if mean_brightness < 50:
+            quality_mult = 0.5 + (mean_brightness - 30) / 40.0  # 30→0.5, 50→1.0
+        elif mean_brightness > 210:
+            quality_mult = 1.0 - (mean_brightness - 210) / 90.0  # 210→1.0, 240→0.67
+        else:
+            quality_mult = 1.0
+        quality_mult = max(0.3, min(1.0, quality_mult))
+        # 銳利度：Laplacian variance < 40 視為模糊（手持搖晃 / 失焦）
+        try:
+            _gray_q = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _lap_var = float(cv2.Laplacian(_gray_q, cv2.CV_64F).var())
+            if _lap_var < 40:
+                quality_mult *= 0.5 + _lap_var / 80.0  # 0→0.5, 40→1.0
+        except Exception:
+            pass
+
         # 臉部評分
         face_score = 0.0
         n_faces = 0
@@ -4061,8 +5765,14 @@ def _score_video_highlights(video_path, strategy, progress_cb=None,
                     # ★ 人物專屬評分：只計算「目標人物」的臉部面積
                     # 同時記錄其他臉的最大面積供 per-clip 多人偵測使用
                     best_person_area = 0
+                    best_target_face = None  # 記錄 landmarks 供 pose/smile 評分
+                    largest_face = None
+                    largest_face_area = 0
                     for f in faces:
                         area = f[2] * f[3]
+                        if area > largest_face_area:
+                            largest_face_area = area
+                            largest_face = f
                         is_target = False
                         try:
                             aligned = recognizer.alignCrop(frame, f)
@@ -4076,18 +5786,32 @@ def _score_video_highlights(video_path, strategy, progress_cb=None,
                                 if _passes_negative_check(emb, ref_embeddings,
                                                            neg_embeddings, max_sim):
                                     is_target = True
-                                    best_person_area = max(best_person_area, area)
+                                    if area > best_person_area:
+                                        best_person_area = area
+                                        best_target_face = f
                         except Exception:
                             pass
                         if not is_target and area > other_max_area:
                             other_max_area = area
                     target_area = best_person_area
-                    face_score = min(best_person_area / frame_area * 10, 1.0)
+                    face_score = _whole_body_face_score(best_person_area, frame_area)
+                    # Wave 5 C2: pose + smile 分數
+                    _pose_face = best_target_face if best_target_face is not None else largest_face
+                    if _pose_face is not None and face_score > 0:
+                        pose_sc, smile_sc = _face_pose_smile_score(_pose_face)
+                    else:
+                        pose_sc, smile_sc = 0.5, 0.3
                 else:
                     # 通用評分：任何人的最大臉
                     areas = [f[2] * f[3] for f in faces]
-                    face_score = min(max(areas) / frame_area * 10, 1.0)
-                    target_area = max(areas)
+                    _maxi = int(np.argmax(areas))
+                    face_score = _whole_body_face_score(areas[_maxi], frame_area)
+                    target_area = areas[_maxi]
+                    pose_sc, smile_sc = _face_pose_smile_score(faces[_maxi])
+            else:
+                pose_sc, smile_sc = 0.5, 0.3
+        else:
+            pose_sc, smile_sc = 0.5, 0.3
 
         # 動態評分：幀間差異
         motion_score = 0.0
@@ -4117,13 +5841,22 @@ def _score_video_highlights(video_path, strategy, progress_cb=None,
             # （0.15 太狠會把舞台廣播切到 < 20s；0.10 又會放過 PIP 小臉）
             if _has_person_ref and face_w > 0 and face_score < 0.12:
                 combined = 0.0
+            else:
+                combined *= quality_mult  # 畫質懲罰：暗/過曝/模糊扣分
+                # Wave 5 C2: pose + smile 加成（最多 +20%）。
+                # 只在 face_score > 0（有臉可評）時生效
+                if face_score > 0:
+                    _expr_mult = 1.0 + 0.12 * pose_sc + 0.08 * smile_sc
+                    combined *= _expr_mult
 
         scores.append({"time": t, "score": combined, "duration": duration,
                        "is_vertical": is_vertical,
                        "audio_energy": audio_score,
                        "n_faces": n_faces,
                        "target_area": float(target_area) / max(frame_area, 1),
-                       "other_max_area": float(other_max_area) / max(frame_area, 1)})
+                       "other_max_area": float(other_max_area) / max(frame_area, 1),
+                       "pose": float(pose_sc),
+                       "smile": float(smile_sc)})
         t += 1.0
         if progress_cb:
             progress_cb(t / duration)
@@ -4202,6 +5935,119 @@ def _clip_history_path(person):
     extract_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
     os.makedirs(extract_dir, exist_ok=True)
     return os.path.join(extract_dir, "_clip_history.json")
+
+
+# ── 搜尋變體輪替 + 影片級冷卻 ──
+# 目的：同一個人物多次生成時，強迫搜尋用不同變體、強迫排除最近幾次用過的影片，
+# 避免 YouTube 對相同 query 穩定回傳同一批 top-N 被我們永遠拿到。
+def _query_rotation_path(person):
+    if not person:
+        return None
+    extract_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
+    os.makedirs(extract_dir, exist_ok=True)
+    return os.path.join(extract_dir, "_query_rotation.json")
+
+
+def _get_rotation_idx(person, key):
+    """讀取輪替索引（依 video_type 分別計數）。"""
+    import json
+    path = _query_rotation_path(person)
+    if not path or not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        return int(data.get(key, 0))
+    except Exception:
+        return 0
+
+
+def _bump_rotation_idx(person, key):
+    """用完一輪後 +1，下次跑會切到下一組變體。"""
+    import json
+    path = _query_rotation_path(person)
+    if not path:
+        return
+    try:
+        data = {}
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        data[key] = int(data.get(key, 0)) + 1
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _video_history_path(person):
+    if not person:
+        return None
+    extract_dir = os.path.join(YT_EXTRACTS, sanitize_name(person))
+    os.makedirs(extract_dir, exist_ok=True)
+    return os.path.join(extract_dir, "_video_history.json")
+
+
+def _load_video_cooldown(person, keep_runs=3):
+    """回傳最近 keep_runs 次生成用過的 video_id 集合（用來從候選池硬排除）。"""
+    import json
+    path = _video_history_path(person)
+    if not path or not os.path.isfile(path):
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            runs = json.load(f) or []
+        recent = runs[-keep_runs:]
+        vids = set()
+        for run in recent:
+            for v in (run.get("video_ids") or []):
+                if v:
+                    vids.add(v)
+        return vids
+    except Exception:
+        return set()
+
+
+def _save_video_cooldown(person, video_ids):
+    """追加本次用到的 video_ids 到歷史。只保留最近 20 次 run。"""
+    import json
+    path = _video_history_path(person)
+    if not path or not video_ids:
+        return
+    try:
+        runs = []
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                runs = json.load(f) or []
+        runs.append({
+            "ts": datetime.now().isoformat(),
+            "video_ids": list(set(video_ids)),
+        })
+        runs = runs[-20:]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(runs, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _extract_video_id(url_or_basename):
+    """從檔名或 URL 抓 video id。檔名格式通常是 {vid}_{person}.mp4。"""
+    if not url_or_basename:
+        return ""
+    s = str(url_or_basename)
+    # URL
+    import re as _re
+    m = _re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", s)
+    if m: return m.group(1)
+    m = _re.search(r"(?:youtu\.be|shorts|video)/([A-Za-z0-9_-]{6,})", s)
+    if m: return m.group(1)
+    # basename: {vid}_{person}.mp4 or {digits}_{person}.mp4 (tiktok)
+    base = os.path.basename(s)
+    base = os.path.splitext(base)[0]
+    # split on _ once from left; first token is often the id
+    if "_" in base:
+        return base.split("_", 1)[0]
+    return base
 
 
 def _load_clip_history(person):
@@ -4300,6 +6146,87 @@ def _add_to_clip_blacklist(person, video_basename, time_sec):
         pass
 
 
+def _detect_face_track(video_path, t_start, clip_dur, sample_hz=4.0, sigma_sec=0.25):
+    """FACE_TRACK_V1 — 密集採樣 + 雙向 smoothing，回傳每幀 crop 中心。
+
+    - 在 clip 區間內每 1/sample_hz 秒偵測一次臉
+    - 遺失幀用線性插值補（轉身、側臉會短暫失偵）
+    - 以中心式 Gaussian 卷積平滑（離線處理，零 lag）
+    - 內插到 30Hz 輸出 — FFmpeg sendcmd 會按時間點逐格套 crop x/y
+
+    回傳: (samples, src_W, src_H) 或 (None, 0, 0)
+          samples = [(t_rel, cx, cy), ...] 在 SOURCE 像素座標
+    """
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+        cap = _cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None, 0, 0
+        W = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(_cv2.CAP_PROP_FPS) or 25.0
+        if W <= 0 or H <= 0 or clip_dur <= 0:
+            cap.release()
+            return None, 0, 0
+        detector = _cv2.FaceDetectorYN.create(YUNET_MODEL, "", (W, H), 0.6, 0.3, 5000)
+
+        n = max(2, int(round(clip_dur * sample_hz)))
+        step = clip_dur / (n - 1) if n > 1 else 0.0
+        known_t, known_x, known_y = [], [], []
+        prev_cx, prev_cy = None, None
+        # 跳躍閥值：一步 (1/sample_hz 秒) 內臉中心移動超過這個距離就視為偵測錯誤
+        max_jump = max(W, H) * 0.25
+        for i in range(n):
+            rel_t = i * step
+            cap.set(_cv2.CAP_PROP_POS_FRAMES, int((t_start + rel_t) * fps))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            _, faces = detector.detect(frame)
+            if faces is None or len(faces) == 0:
+                continue
+            # 第一幀：取最大臉；之後：取離前一個中心最近的臉（時間連續性）
+            if prev_cx is None:
+                face = max(faces, key=lambda f: f[2] * f[3])
+            else:
+                face = min(faces, key=lambda f: (f[0] + f[2] / 2 - prev_cx) ** 2
+                                              + (f[1] + f[3] / 2 - prev_cy) ** 2)
+            cx = float(face[0] + face[2] / 2)
+            cy = float(face[1] + face[3] / 2)
+            # 離群點過濾：若與前一點距離超過閥值，丟棄此偵測
+            if prev_cx is not None:
+                if ((cx - prev_cx) ** 2 + (cy - prev_cy) ** 2) ** 0.5 > max_jump:
+                    continue
+            known_t.append(rel_t)
+            known_x.append(cx)
+            known_y.append(cy)
+            prev_cx, prev_cy = cx, cy
+        cap.release()
+        if not known_t:
+            return None, 0, 0
+
+        kt = _np.array(known_t)
+        kx = _np.array(known_x)
+        ky = _np.array(known_y)
+        dense_t = _np.arange(0, clip_dur + 1e-6, 1.0 / 30.0)
+        dx = _np.interp(dense_t, kt, kx)
+        dy = _np.interp(dense_t, kt, ky)
+
+        sigma_samples = sigma_sec * 30.0
+        win = max(3, int(sigma_samples * 3))
+        if len(dx) > 2 * win + 1:
+            k = _np.arange(-win, win + 1)
+            g = _np.exp(-k * k / (2 * sigma_samples * sigma_samples))
+            g /= g.sum()
+            dx = _np.convolve(dx, g, mode='same')
+            dy = _np.convolve(dy, g, mode='same')
+
+        return [(float(t), float(x), float(y)) for t, x, y in zip(dense_t, dx, dy)], W, H
+    except Exception:
+        return None, 0, 0
+
+
 def _detect_face_center(video_path, t_sec, clip_dur=0):
     """偵測 clip 區間內多幀的主臉中心中位數，讓裁切框更穩定。
     取 clip 的 0%, 25%, 50%, 75% 四個時間點偵測臉部位置，
@@ -4350,6 +6277,282 @@ def _detect_face_center(video_path, t_sec, clip_dur=0):
         return (cx, cy, w, h)
     except Exception:
         return None
+
+
+_WATERMARK_CACHE = {}
+
+def _detect_watermark_regions(video_path, max_regions=4):
+    """偵測來源影片的靜態浮水印 / 頻道 logo 區塊（V2，參考 DanceMashup/logo_detect）。
+
+    改進：30 幀、縮到 480px、mean 排除均勻填充、close 15×15×2、
+    pad=12 iterative box merge —— 多字元 logo（MPD 직캠 / 입덕직캠）
+    會合併成完整區塊。
+    """
+    try:
+        cached = _WATERMARK_CACHE.get(video_path)
+        if cached is not None:
+            return cached
+        import cv2 as _cv2
+        import numpy as _np
+        cap = _cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            _WATERMARK_CACHE[video_path] = tuple()
+            return tuple()
+        total = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+        fw = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+        fh = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+        if total < 30 or fw <= 0 or fh <= 0:
+            cap.release()
+            _WATERMARK_CACHE[video_path] = tuple()
+            return tuple()
+
+        # 跳過前後 5%（避開 title card / outro）
+        margin = max(1, int(total * 0.05))
+        idx_start = margin
+        idx_end = max(margin + 1, total - margin)
+        n_samples = min(30, max(8, idx_end - idx_start))
+        indices = _np.linspace(idx_start, idx_end - 1, n_samples).astype(int)
+
+        # 縮到 480px 做偵測 —— 快且穩
+        scale = 480.0 / max(fw, fh) if max(fw, fh) > 480 else 1.0
+        dw = max(1, int(round(fw * scale)))
+        dh = max(1, int(round(fh * scale)))
+
+        frames = []
+        for fi in indices:
+            cap.set(_cv2.CAP_PROP_POS_FRAMES, int(fi))
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                continue
+            if scale != 1.0:
+                fr = _cv2.resize(fr, (dw, dh), interpolation=_cv2.INTER_AREA)
+            frames.append(_cv2.cvtColor(fr, _cv2.COLOR_BGR2GRAY))
+        cap.release()
+        if len(frames) < 8:
+            _WATERMARK_CACHE[video_path] = tuple()
+            return tuple()
+
+        stack = _np.stack(frames).astype(_np.float32)
+        std = stack.std(axis=0)
+        mean = stack.mean(axis=0)
+
+        mask = (std < 8.0).astype(_np.uint8) * 255
+        # 排除近均勻填充（全黑 letterbox / 全白）
+        mask[(mean < 8) | (mean > 248)] = 0
+
+        # 較大 close kernel —— 讓多字元 logo 的字與字合併
+        k_close = _cv2.getStructuringElement(_cv2.MORPH_RECT, (15, 15))
+        k_open = _cv2.getStructuringElement(_cv2.MORPH_RECT, (3, 3))
+        mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, k_close, iterations=2)
+        mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN, k_open, iterations=1)
+
+        nlab, _labels, stats, _cent = _cv2.connectedComponentsWithStats(
+            mask, connectivity=8)
+        frame_area = dw * dh
+        candidates = []
+        for i in range(1, nlab):
+            x, y, cw, ch, area = stats[i]
+            ar = area / frame_area
+            if ar < 0.0003 or ar > 0.10:
+                continue
+            cx_rel = (x + cw / 2.0) / dw
+            cy_rel = (y + ch / 2.0) / dh
+            # 中心主體區拒絕
+            if 0.30 < cx_rel < 0.70 and 0.25 < cy_rel < 0.75:
+                continue
+            aspect = cw / max(1, ch)
+            if aspect < 0.15 or aspect > 8.0:
+                continue
+            candidates.append((ar, x, y, cw, ch))
+
+        candidates.sort(reverse=True)
+        candidates = candidates[:max_regions]
+
+        # BOX_MERGE：放大 pad 到 12px，迭代合併重疊/相接區塊
+        inv = 1.0 / scale if scale != 0 else 1.0
+        pad = 12
+        raw_boxes = []
+        for _ar, x, y, cw, ch in candidates:
+            sx = max(0, int(round(x * inv)) - pad)
+            sy = max(0, int(round(y * inv)) - pad)
+            sw = min(fw - sx, int(round(cw * inv)) + 2 * pad)
+            sh = min(fh - sy, int(round(ch * inv)) + 2 * pad)
+            if sw <= 1 or sh <= 1:
+                continue
+            raw_boxes.append([sx, sy, sx + sw, sy + sh])
+
+        def _touch(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            return not (ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1)
+
+        changed = True
+        while changed:
+            changed = False
+            used = [False] * len(raw_boxes)
+            out = []
+            for i, b in enumerate(raw_boxes):
+                if used[i]:
+                    continue
+                cur = list(b)
+                for j in range(i + 1, len(raw_boxes)):
+                    if used[j]:
+                        continue
+                    if _touch(cur, raw_boxes[j]):
+                        cur = [min(cur[0], raw_boxes[j][0]),
+                               min(cur[1], raw_boxes[j][1]),
+                               max(cur[2], raw_boxes[j][2]),
+                               max(cur[3], raw_boxes[j][3])]
+                        used[j] = True
+                        changed = True
+                out.append(cur)
+                used[i] = True
+            raw_boxes = out
+
+        result_list = []
+        for x1, y1, x2, y2 in raw_boxes:
+            bw, bh = x2 - x1, y2 - y1
+            if bw <= 1 or bh <= 1:
+                continue
+            result_list.append((int(x1), int(y1), int(bw), int(bh)))
+
+        result = tuple(result_list)
+        _WATERMARK_CACHE[video_path] = result
+        if result:
+            logging.info(f"watermark detected in {os.path.basename(video_path)}: "
+                         f"{len(result)} region(s) {result}")
+        else:
+            logging.info(f"watermark scan {os.path.basename(video_path)}: "
+                         f"no region passed filters (std_min={float(std.min()):.1f})")
+        return result
+    except Exception as _e:
+        logging.warning(f"watermark detection failed for {video_path}: {_e}")
+        _WATERMARK_CACHE[video_path] = tuple()
+        return tuple()
+
+
+# ── LaMA 浮水印去除：CPU inpainting，只對 watermark 區域做局部處理 ──
+_LAMA_MODEL = None
+_LAMA_INIT_FAILED = False
+
+
+def _get_lama():
+    """Lazy-load LaMA；載入失敗或套件缺失則回傳 None"""
+    global _LAMA_MODEL, _LAMA_INIT_FAILED
+    if _LAMA_INIT_FAILED:
+        return None
+    if _LAMA_MODEL is not None:
+        return _LAMA_MODEL
+    try:
+        from simple_lama_inpainting import SimpleLama
+        _LAMA_MODEL = SimpleLama()
+        logging.info("LaMA model loaded (CPU)")
+        return _LAMA_MODEL
+    except Exception as _e:
+        logging.warning(f"LaMA init failed ({_e}); falling back to FFmpeg delogo")
+        _LAMA_INIT_FAILED = True
+        return None
+
+
+def _lama_clean_segment(src_video, t_start, duration, boxes, out_path,
+                         ffmpeg="ffmpeg", context_pad=40):
+    """用 LaMA 把 clip segment 的 watermark 區域抹掉，輸出到 out_path。
+    boxes: list of (x, y, w, h) in SOURCE pixel coords.
+    回傳 True 成功 / False 失敗（呼叫端應 fallback 到 delogo）
+    """
+    lama = _get_lama()
+    if lama is None or not boxes:
+        return False
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+        from PIL import Image
+
+        cap = _cv2.VideoCapture(src_video)
+        if not cap.isOpened():
+            return False
+        fps = cap.get(_cv2.CAP_PROP_FPS) or 30.0
+        W = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+        n_frames = max(1, int(round(duration * fps)))
+        cap.set(_cv2.CAP_PROP_POS_FRAMES, int(t_start * fps))
+
+        fourcc = _cv2.VideoWriter_fourcc(*'mp4v')
+        writer = _cv2.VideoWriter(out_path, fourcc, fps, (W, H))
+        if not writer.isOpened():
+            cap.release()
+            return False
+
+        # 預先計算每個 box 的裁切範圍（含 context padding）
+        crop_regions = []
+        for (bx, by, bw, bh) in boxes:
+            cx1 = max(0, bx - context_pad)
+            cy1 = max(0, by - context_pad)
+            cx2 = min(W, bx + bw + context_pad)
+            cy2 = min(H, by + bh + context_pad)
+            # mask 位置（在 crop 內的相對座標）
+            mx1 = bx - cx1
+            my1 = by - cy1
+            crop_regions.append((cx1, cy1, cx2, cy2, mx1, my1, bw, bh))
+
+        t0 = time.time()
+        for i in range(n_frames):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            for (cx1, cy1, cx2, cy2, mx1, my1, bw, bh) in crop_regions:
+                patch = frame[cy1:cy2, cx1:cx2]
+                if patch.size == 0:
+                    continue
+                mask = _np.zeros((cy2 - cy1, cx2 - cx1), dtype=_np.uint8)
+                mask[my1:my1 + bh, mx1:mx1 + bw] = 255
+                try:
+                    pil_img = Image.fromarray(_cv2.cvtColor(patch, _cv2.COLOR_BGR2RGB))
+                    pil_mask = Image.fromarray(mask)
+                    out_pil = lama(pil_img, pil_mask)
+                    cleaned = _cv2.cvtColor(_np.array(out_pil), _cv2.COLOR_RGB2BGR)
+                    if cleaned.shape[:2] != patch.shape[:2]:
+                        cleaned = _cv2.resize(cleaned, (patch.shape[1], patch.shape[0]))
+                    frame[cy1:cy2, cx1:cx2] = cleaned
+                except Exception as _e:
+                    logging.warning(f"LaMA inpaint frame={i} box={(cx1,cy1,cx2,cy2)} failed: {_e}")
+                    continue
+            writer.write(frame)
+        cap.release()
+        writer.release()
+        dt = time.time() - t0
+        logging.info(f"LaMA cleaned {n_frames} frames ({len(boxes)} regions) in {dt:.1f}s")
+
+        # 把原音訊 mux 回來：out_path 目前只有影片，需要搭配原 src_video 的音軌
+        video_only = out_path + ".v.mp4"
+        try:
+            os.replace(out_path, video_only)
+            mux_cmd = [
+                ffmpeg, "-y",
+                "-i", video_only,
+                "-ss", f"{t_start:.3f}", "-t", f"{duration:.3f}", "-i", src_video,
+                "-map", "0:v", "-map", "1:a?",
+                "-c:v", "copy", "-c:a", "copy",
+                out_path,
+            ]
+            import subprocess as _sp
+            _r = _sp.run(mux_cmd, capture_output=True, timeout=60)
+            if _r.returncode != 0:
+                # mux 失敗（可能 src 沒音軌），留下純影片
+                os.replace(video_only, out_path)
+            else:
+                try: os.remove(video_only)
+                except Exception: pass
+        except Exception as _e:
+            logging.warning(f"LaMA audio mux failed: {_e}")
+            try:
+                if os.path.exists(video_only):
+                    os.replace(video_only, out_path)
+            except Exception: pass
+        return True
+    except Exception as _e:
+        logging.warning(f"LaMA segment cleaning failed: {_e}")
+        return False
 
 
 def _pick_cover_frame(clips, output_video_path):
@@ -4415,7 +6618,7 @@ def _pick_cover_frame(clips, output_video_path):
         if best_frame is None:
             return None
         cover_path = os.path.splitext(output_video_path)[0] + "_cover.jpg"
-        _cv2.imwrite(cover_path, best_frame, [_cv2.IMWRITE_JPEG_QUALITY, 92])
+        _cv_imwrite_unicode(cover_path, best_frame, [_cv2.IMWRITE_JPEG_QUALITY, 92])
         logging.info(f"cover picked, score={best_score:.3f} → {cover_path}")
         return cover_path
     except Exception as e:
@@ -4462,18 +6665,18 @@ def _phash_hamming(a, b):
 # ── Fan-edit / 二次加工偵測 ──
 # 避免抓到粉絲剪輯合集、split-screen 比較、套模板貼字的二次加工內容
 _FAN_EDIT_KEYWORDS = (
-    " edit", " edits", "edited", "compilation", "mashup", "mash-up",
+    # 僅保留強訊號；移除 " vs "/"best of"/"top N"/"cover"/"편집"/"모음"/"커버"
+    # 等常見直拍 / 翻唱 / 標題噪音字，降低誤判
+    "compilation", "mashup", "mash-up",
     "fmv", "f.m.v", "fan edit", "fanedit",
-    " vs ", " vs.", " vs:", "versus", " v.s ",
-    "transition", " comp ", " comp.",
+    "transition",
     "best moments", "cute moments", "funny moments",
-    "best of ", "top 10", "top10", "top 5", "top5",
     "reaction", " meme", "memes",
     "tiktok edit", "tiktok comp", "see the difference",
-    "parody", "cover by", " cover ", "duet",
+    "parody", "cover by", "duet",
     "raising the expectations",
-    # 中韓日
-    "편집", "모음", "편집본", "剪輯", "合集", "比較", "まとめ", "커버",
+    # 中韓日（保留明確剪輯 / 合集類）
+    "편집본", "剪輯", "合集", "まとめ",
 )
 _FAN_EDIT_SAFE_KEYWORDS = (
     "fancam", "fan cam", "직캠",
@@ -4678,7 +6881,7 @@ def _detect_split_screen(video_path):
             except Exception:
                 pass
 
-        return samples >= 3 and hits >= 2
+        return samples >= 3 and hits >= 4  # 提高門檻：需要 text + corner 兩種訊號都中
     except Exception:
         return False
 
@@ -4706,7 +6909,10 @@ def _is_fan_edit(video_path):
 
 
 def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_video,
-                            person=None, prefer_vertical=False):
+                            person=None, prefer_vertical=False,
+                            min_presence_ratio=0.25, allow_multi_member=False,
+                            bgm_path=None, ref_embeddings=None, neg_embeddings=None,
+                            target_ratio_min=0.0, shake_max=None, sharpness_min=None):
     """從所有影片中挑選最佳片段（優先選未使用過的，排除黑名單）"""
     # 載入歷史記錄和黑名單
     used_set = _load_clip_history(person) if person else set()
@@ -4770,7 +6976,7 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
             _face_presence_ratio = _face_sec_count / max(len(clip_scores), 1)
             if clip_avg < _CLIP_AVG_FLOOR and s["score"] > 0:
                 continue
-            if _face_presence_ratio < 0.34:
+            if _face_presence_ratio < min_presence_ratio:
                 continue  # 目標人物在 clip 內不到 1/3 秒數，剔除
             _weighted_score = clip_avg * (0.5 + 0.5 * _face_presence_ratio)
             # 檢查是否曾使用過
@@ -4803,27 +7009,61 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
     for video_path, scores in all_scores:
         _score_index[video_path] = {int(s["time"]): s for s in scores if isinstance(s, dict)}
 
-    def _clip_is_multi_member(video_path, t_start, dur):
-        """若 clip 內 ≥50% 秒數同時滿足：n_faces≥2 且 other_max_area ≥ target_area×0.5
-        則視為多人片段（如 fan-edit 中的合舞、split-screen）。"""
+    def _clip_multi_member_stats(video_path, t_start, dur):
+        """
+        Returns dict:
+          - is_multi: True 代表「整個 clip 都是目標非主角」應該丟棄
+          - dominance: 目標平均 area / 其他最大 area（>1 代表目標更大）
+          - mean_target_area: 目標平均相對面積
+          - frac_non_dominant: 有多少秒目標 < 其他人（完全被蓋過）
+        規則：
+          - >=50% 秒數「完全被蓋過」（target_area < other_max_area × 0.8）→ is_multi=True
+          - 剩下狀況（即使有多人但目標較大/相當）→ is_multi=False
+          - 相容舊行為但更寬鬆：允許「目標主導的多人鏡頭」（通常是 fancam 帶到別人）
+        """
         idx = _score_index.get(video_path)
+        default = {"is_multi": False, "dominance": 1.0,
+                   "mean_target_area": 0.0, "frac_non_dominant": 0.0}
         if not idx:
-            return False
-        multi = 0
+            return default
         total_sec = 0
+        non_dom = 0
+        sum_ta = 0.0
+        sum_oa = 0.0
+        sum_ta_sq = 0.0
         for sec in range(int(t_start), int(t_start + dur) + 1):
             s = idx.get(sec)
             if not s:
                 continue
             total_sec += 1
             n = s.get("n_faces", 0)
-            ta = s.get("target_area", 0.0)
-            oa = s.get("other_max_area", 0.0)
-            if n >= 2 and oa >= max(ta * 0.5, 0.005):
-                multi += 1
+            ta = float(s.get("target_area", 0.0))
+            oa = float(s.get("other_max_area", 0.0))
+            sum_ta += ta
+            sum_oa += oa
+            sum_ta_sq += ta * ta
+            if n >= 2 and ta > 0 and oa > ta * 0.8:
+                # 其他人 > 目標 × 0.8 → 這秒目標非主導
+                non_dom += 1
+            elif n >= 2 and ta <= 0 and oa > 0.01:
+                # 偵測不到目標但有其他大臉 → 這秒是別人
+                non_dom += 1
         if total_sec == 0:
-            return False
-        return multi / total_sec >= 0.5
+            return default
+        frac = non_dom / total_sec
+        mean_ta = sum_ta / total_sec
+        mean_oa = sum_oa / total_sec
+        dom = mean_ta / max(mean_oa, 0.001) if mean_oa > 0 else float("inf")
+        return {
+            "is_multi": frac >= 0.5,
+            "dominance": dom,
+            "mean_target_area": mean_ta,
+            "frac_non_dominant": frac,
+        }
+
+    def _clip_is_multi_member(video_path, t_start, dur):
+        """Backward-compat wrapper around _clip_multi_member_stats."""
+        return _clip_multi_member_stats(video_path, t_start, dur)["is_multi"]
 
     selected = []
     video_counts = {}
@@ -4867,11 +7107,20 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
             logging.info(f"subtitle rejected: {os.path.basename(v)} @{c['time']:.1f}s")
             continue
 
-        # Per-clip 多人偵測：若整個 clip 都是多人合舞/split-screen，丟棄
-        if _clip_is_multi_member(v, c["time"], clip_duration):
+        # Per-clip 多人偵測（B1 dominance-aware）：
+        # 新邏輯：只要目標主導 >= 50% 秒數就放行；整個 clip 目標都被蓋過才丟
+        # allow_multi_member=True 時略過這個檢查（fallback 最後一層保險閥）
+        mm_stats = _clip_multi_member_stats(v, c["time"], clip_duration)
+        c["_dominance"] = mm_stats["dominance"]
+        c["_frac_non_dominant"] = mm_stats["frac_non_dominant"]
+        if not allow_multi_member and mm_stats["is_multi"]:
             _rej["multi"] += 1
-            logging.info(f"multi-member rejected: {os.path.basename(v)} @{c['time']:.1f}s")
+            logging.info(f"multi-member rejected: {os.path.basename(v)} "
+                         f"@{c['time']:.1f}s (frac_non_dom={mm_stats['frac_non_dominant']:.2f})")
             continue
+        # B1 加分：目標明顯主導 (dominance >= 2) 小幅加分
+        if mm_stats["dominance"] >= 2.0:
+            c["score"] *= 1.05
 
         selected.append(c)
         if ph is not None:
@@ -4888,24 +7137,72 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
     if used_count > 0:
         logging.info(f"clip selection: {unused_count} new + {used_count} reused clips")
 
-    # ── 切點對齊到安靜處（beat-aware cutting）──
-    # 為每個選中片段把起點對齊到 ±1.5 秒內音訊能量最低的位置
+    # ── 切點對齊（shot-first → beat → quiet-fallback） ──
+    # 優先順序：
+    #   1. Shot boundary（PySceneDetect 偵測到的鏡頭切換）— 視覺連續性最強訊號
+    #   2. Beat：若提供 BGM 則用 BGM beats，否則用來源音訊 onsets
+    #   3. Quiet-snap：音訊能量最低處
+    #
+    # 理由：
+    #   - 切到鏡頭中間最容易被觀眾感到「沒剪過」。Shot boundary 吸附能消除這個。
+    #   - BGM beat 對齊讓最終成片的節奏吻合要鋪的背景音樂，而非素材本身的音訊。
+    #   - 若 BGM 無 → 退回來源 onset，保持舊行為相容。
     energy_by_video = {}
     for video_path, scores in all_scores:
         if scores and isinstance(scores[0], dict) and "audio_energy" in scores[0]:
             energy_by_video[video_path] = np.array(
                 [s.get("audio_energy", 0.0) for s in scores], dtype=np.float32)
+
+    # BGM onset（若有提供）— 注意這個會影響「預期的最終 timeline cut 點」，
+    # 但因為 selected clip 的起點是 source-video time，直接用 BGM onset snap
+    # source time 在語意上不對。所以 BGM onset 主要用於 compile 階段決定 clip 輸出長度。
+    # 這裡的 snap 行為保持用來源音訊 onset（避免混淆），BGM 對齊落在 compile。
+    # — 除非來源是 mute（audio_mode），此時 source onset 無意義，才改用 BGM onset 粗略對齊。
+
+    shot_snap_count = 0
+    beat_snap_count = 0
+    quiet_snap_count = 0
     for c in selected:
-        energy = energy_by_video.get(c["video"])
-        if energy is None or len(energy) == 0:
-            continue
-        original_t = c["time"]
-        new_t = _snap_cut_to_quiet(energy, original_t, window_sec=1.5)
         vid_dur = c.get("src_duration", 9999)
         tail_buffer_snap = min(5.0, vid_dur * 0.15) if vid_dur < 30 else 5.0
         usable_end_snap = max(clip_duration, vid_dur - tail_buffer_snap)
-        if 0 <= new_t and new_t + clip_duration <= usable_end_snap:
+        original_t = c["time"]
+        new_t = None
+        # 1. Shot boundary snap（最高優先）
+        if HAS_SCENEDETECT:
+            try:
+                bounds = _detect_scene_boundaries(c["video"])
+                if bounds is not None and len(bounds) > 0:
+                    cand = _snap_cut_to_shot_boundary(
+                        bounds, original_t, clip_duration,
+                        window_sec=0.6, usable_end=usable_end_snap)
+                    if cand is not None:
+                        new_t = cand
+                        shot_snap_count += 1
+            except Exception as _sd_e:
+                logging.debug(f"shot snap skipped: {_sd_e}")
+        # 2. Beat-snap（若 shot snap 沒命中）
+        if new_t is None:
+            onsets = _extract_onset_times(c["video"])
+            if onsets is not None:
+                cand = _snap_cut_to_beat(onsets, original_t, window_sec=1.5)
+                if cand is not None and 0 <= cand and cand + clip_duration <= usable_end_snap:
+                    new_t = cand
+                    beat_snap_count += 1
+        # 3. Quiet-snap
+        if new_t is None:
+            energy = energy_by_video.get(c["video"])
+            if energy is None or len(energy) == 0:
+                continue
+            cand = _snap_cut_to_quiet(energy, original_t, window_sec=1.5)
+            if 0 <= cand and cand + clip_duration <= usable_end_snap:
+                new_t = cand
+                quiet_snap_count += 1
+        if new_t is not None:
             c["time"] = new_t
+    if shot_snap_count + beat_snap_count + quiet_snap_count > 0:
+        logging.info(f"cut snap: shot={shot_snap_count} beat={beat_snap_count} "
+                     f"quiet={quiet_snap_count} of {len(selected)}")
 
     # 對齊後可能造成同一部影片的片段位置接近，重新檢查重疊並剔除
     selected.sort(key=lambda x: (x["video"], x["time"]))
@@ -4960,6 +7257,60 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
     except Exception as e:
         logging.debug(f"loop closure skipped: {e}")
 
+    # ── A3: Target-face 密集抽樣過濾（2Hz）──
+    # 跟 min_presence_ratio（1Hz 計算）互補；這是對已選 clip 的最後確認。
+    # 設 0 代表略過這個檢查。
+    if target_ratio_min > 0 and ref_embeddings is not None:
+        a3_kept = []
+        a3_rej = 0
+        for c in selected:
+            try:
+                r = _measure_clip_target_face_ratio(
+                    c["video"], c["time"], clip_duration,
+                    ref_embeddings, neg_embeddings, sample_hz=2.0)
+            except Exception as _a3_e:
+                logging.debug(f"A3 measure failed: {_a3_e}")
+                r = None
+            if r is None:
+                a3_kept.append(c)  # 量測失敗視為通過（寬容）
+                continue
+            c["_target_ratio"] = float(r)
+            if r >= target_ratio_min:
+                a3_kept.append(c)
+            else:
+                a3_rej += 1
+        if a3_rej:
+            logging.info(f"A3 target-face filter: {a3_rej} rejected (min={target_ratio_min:.2f})")
+        selected = a3_kept
+
+    # ── A4: Blur / Shake 品質過濾 ──
+    if (shake_max is not None or sharpness_min is not None) and selected:
+        a4_kept = []
+        a4_rej = {"blur": 0, "shake": 0}
+        for c in selected:
+            try:
+                sharpness, shake = _measure_clip_motion_quality(
+                    c["video"], c["time"], clip_duration, sample_hz=4.0)
+            except Exception as _a4_e:
+                logging.debug(f"A4 measure failed: {_a4_e}")
+                sharpness, shake = None, None
+            if sharpness is not None:
+                c["_sharpness"] = float(sharpness)
+            if shake is not None:
+                c["_shake"] = float(shake)
+            bad = False
+            if sharpness_min is not None and sharpness is not None and sharpness < sharpness_min:
+                a4_rej["blur"] += 1
+                bad = True
+            if shake_max is not None and shake is not None and shake > shake_max:
+                a4_rej["shake"] += 1
+                bad = True
+            if not bad:
+                a4_kept.append(c)
+        if a4_rej["blur"] + a4_rej["shake"] > 0:
+            logging.info(f"A4 quality filter: blur={a4_rej['blur']} shake={a4_rej['shake']} rejected")
+        selected = a4_kept
+
     # 清理內部欄位
     for s in selected:
         s.pop("_used", None)
@@ -4969,20 +7320,334 @@ def _select_highlight_clips(all_scores, clip_duration, total_duration, max_per_v
     return selected
 
 
+def _probe_video_size(filepath):
+    """回傳 (w, h) 或 (None, None)。"""
+    try:
+        cap = cv2.VideoCapture(filepath)
+        if not cap.isOpened():
+            return None, None
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    return None, None
+
+
+def _find_realesrgan_binary():
+    """尋找 realesrgan-ncnn-vulkan 可執行檔。失敗回 None。"""
+    import shutil as _sh
+    for name in ("realesrgan-ncnn-vulkan", "realesrgan-ncnn-vulkan.exe"):
+        p = _sh.which(name)
+        if p:
+            return p
+    # 其他常見安裝路徑
+    for guess in (
+        r"C:\tools\realesrgan\realesrgan-ncnn-vulkan.exe",
+        os.path.expandvars(r"%USERPROFILE%\Desktop\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe"),
+    ):
+        if os.path.isfile(guess):
+            return guess
+    return None
+
+
+def _upscale_final_video(output_path, target, ffmpeg=None, has_audio=True):
+    """Wave 6 C4: 若來源解析度 < target，用 Real-ESRGAN (可用時) 或 ffmpeg Lanczos 升頻。
+
+    target: "720p" / "1080p" / "auto"（"auto" → 若 < 720p 升到 720p）
+    失敗保留原檔。
+    """
+    import subprocess
+    if ffmpeg is None:
+        ffmpeg = _get_ffmpeg()
+    sw, sh = _probe_video_size(output_path)
+    if not sw or not sh:
+        return False
+
+    # 判斷目標
+    tgt_map = {"720p": 720, "1080p": 1080}
+    if target == "auto":
+        # 短邊 < 720 就升到 720
+        short = min(sw, sh)
+        if short >= 720:
+            return False
+        tgt_h = 720
+    else:
+        tgt_h = tgt_map.get(target, 0)
+        if tgt_h <= 0:
+            return False
+        # 已達或超過目標就不做
+        if min(sw, sh) >= tgt_h:
+            return False
+
+    _tmp = output_path + ".up.mp4"
+    # ── 優先：Real-ESRGAN ncnn-vulkan ──
+    _bin = _find_realesrgan_binary()
+    if _bin:
+        # Real-ESRGAN 只能對「一系列圖片」升頻。先抽幀 → 升頻 → 重組。
+        # 成本太高，僅在來源極低 (< 480p) 時啟用
+        if min(sw, sh) < 480:
+            try:
+                import tempfile as _tf
+                _scratch = _tf.mkdtemp(prefix="resrgan_")
+                _in_dir = os.path.join(_scratch, "in")
+                _out_dir = os.path.join(_scratch, "out")
+                os.makedirs(_in_dir); os.makedirs(_out_dir)
+                # 抽幀
+                subprocess.run(
+                    [ffmpeg, "-y", "-i", output_path,
+                     os.path.join(_in_dir, "f%06d.png")],
+                    capture_output=True, timeout=600)
+                # 升頻（scale = 2 即可覆蓋大多 480→720/1080 情境）
+                subprocess.run(
+                    [_bin, "-i", _in_dir, "-o", _out_dir, "-s", "2",
+                     "-n", "realesrgan-x4plus-anime", "-f", "png"],
+                    capture_output=True, timeout=3600)
+                # 重組 + 從原檔複製音軌
+                _cmd = [
+                    ffmpeg, "-y",
+                    "-framerate", "30",
+                    "-i", os.path.join(_out_dir, "f%06d.png"),
+                    "-i", output_path,
+                    "-map", "0:v", "-map", "1:a?",
+                    "-vf", f"scale=-2:{tgt_h}:flags=lanczos",
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                    "-c:a", "copy" if has_audio else "copy",
+                    "-pix_fmt", "yuv420p",
+                    _tmp,
+                ]
+                _r = subprocess.run(_cmd, capture_output=True, timeout=1800)
+                shutil.rmtree(_scratch, ignore_errors=True)
+                if _r.returncode == 0 and os.path.isfile(_tmp) and os.path.getsize(_tmp) > 1024:
+                    os.replace(_tmp, output_path)
+                    logging.info(f"upscale via Real-ESRGAN: {sw}x{sh} → target h={tgt_h}")
+                    return True
+                logging.warning(f"Real-ESRGAN pipeline failed, fallback to Lanczos")
+            except Exception as _e:
+                logging.warning(f"Real-ESRGAN failed: {_e}; fallback Lanczos")
+
+    # ── Fallback：ffmpeg Lanczos ──
+    try:
+        _cmd = [
+            ffmpeg, "-y", "-i", output_path,
+            "-vf", f"scale=-2:{tgt_h}:flags=lanczos,unsharp=5:5:0.4:3:3:0.0",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+        ]
+        if has_audio:
+            _cmd += ["-c:a", "copy"]
+        else:
+            _cmd += ["-an"]
+        _cmd.append(_tmp)
+        _r = subprocess.run(_cmd, capture_output=True, timeout=900)
+        if _r.returncode == 0 and os.path.isfile(_tmp) and os.path.getsize(_tmp) > 1024:
+            os.replace(_tmp, output_path)
+            logging.info(f"upscale via Lanczos: {sw}x{sh} → target h={tgt_h}")
+            return True
+        if os.path.isfile(_tmp):
+            try: os.remove(_tmp)
+            except Exception: pass
+        _serr = (_r.stderr[-300:] if _r.stderr else b'').decode(errors='replace')
+        logging.warning(f"Lanczos upscale failed rc={_r.returncode}: {_serr}")
+        return False
+    except Exception as _e:
+        logging.warning(f"upscale exception: {_e}")
+        return False
+
+
+def _interpolate_to_60fps(output_path, ffmpeg=None, has_audio=True):
+    """Wave 6 C6: 用 minterpolate (MCI + AOBMC) 把成品升到 60fps。失敗保留原檔。"""
+    import subprocess
+    if ffmpeg is None:
+        ffmpeg = _get_ffmpeg()
+    if not os.path.isfile(output_path):
+        return False
+    _tmp = output_path + ".60fps.mp4"
+    try:
+        _cmd = [
+            ffmpeg, "-y", "-i", output_path,
+            "-vf", "minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-pix_fmt", "yuv420p",
+        ]
+        if has_audio:
+            _cmd += ["-c:a", "copy"]
+        else:
+            _cmd += ["-an"]
+        _cmd.append(_tmp)
+        _r = subprocess.run(_cmd, capture_output=True, timeout=1200)
+        if _r.returncode == 0 and os.path.isfile(_tmp) and os.path.getsize(_tmp) > 1024:
+            os.replace(_tmp, output_path)
+            logging.info(f"interpolate_60fps OK: "
+                         f"{os.path.getsize(output_path)/1024/1024:.1f}MB")
+            return True
+        if os.path.isfile(_tmp):
+            try: os.remove(_tmp)
+            except Exception: pass
+        _serr = (_r.stderr[-300:] if _r.stderr else b'').decode(errors='replace')
+        logging.warning(f"interpolate_60fps failed rc={_r.returncode}: {_serr}")
+        return False
+    except Exception as _e:
+        logging.warning(f"interpolate_60fps exception: {_e}")
+        return False
+
+
+def _two_pass_loudnorm(output_path, target_I=-14.0, target_TP=-1.5, target_LRA=11.0,
+                       timeout_sec=600):
+    """Wave 4 F1: 對最終成品做 two-pass EBU R128 loudnorm（in-place）。
+
+    第一遍 analyze 量測；第二遍帶 measured 參數做精準壓縮 + linear=true 預防削波。
+    失敗時保留原檔。回傳 True 表示成功替換了 output_path。
+    """
+    import subprocess, json, re as _re
+    ffmpeg = _get_ffmpeg()
+    if not os.path.isfile(output_path):
+        return False
+
+    # Pass 1: analyze
+    try:
+        af1 = (f"loudnorm=I={target_I}:TP={target_TP}:LRA={target_LRA}:"
+               f"print_format=json")
+        r1 = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostats", "-i", output_path,
+             "-vn", "-af", af1, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=timeout_sec)
+        stderr = r1.stderr or ""
+        # loudnorm 印出的 JSON 位在 stderr 最後一段 { ... }
+        matches = _re.findall(r'\{[^{}]*"input_i"[^{}]*\}', stderr, _re.DOTALL)
+        if not matches:
+            logging.warning(f"two_pass_loudnorm: pass1 JSON not found (rc={r1.returncode})")
+            return False
+        stats = json.loads(matches[-1])
+        measured_I = stats.get("input_i")
+        measured_TP = stats.get("input_tp")
+        measured_LRA = stats.get("input_lra")
+        measured_thresh = stats.get("input_thresh")
+        offset = stats.get("target_offset")
+        if any(v is None for v in (measured_I, measured_TP, measured_LRA,
+                                    measured_thresh, offset)):
+            logging.warning(f"two_pass_loudnorm: pass1 stats incomplete: {stats}")
+            return False
+    except Exception as e:
+        logging.warning(f"two_pass_loudnorm: pass1 failed: {e}")
+        return False
+
+    # Pass 2: apply
+    try:
+        af2 = (f"loudnorm=I={target_I}:TP={target_TP}:LRA={target_LRA}:"
+               f"measured_I={measured_I}:measured_TP={measured_TP}:"
+               f"measured_LRA={measured_LRA}:measured_thresh={measured_thresh}:"
+               f"offset={offset}:linear=true:print_format=summary")
+        tmp_out = output_path + ".ln2.mp4"
+        r2 = subprocess.run(
+            [ffmpeg, "-y", "-hide_banner", "-nostats", "-i", output_path,
+             "-af", af2,
+             "-c:v", "copy",
+             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+             tmp_out],
+            capture_output=True, timeout=timeout_sec)
+        if r2.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
+            os.replace(tmp_out, output_path)
+            logging.info(f"two_pass_loudnorm OK: measured_I={measured_I} → target {target_I}")
+            return True
+        else:
+            _serr = (r2.stderr[-300:] if r2.stderr else b'').decode(errors='replace')
+            logging.warning(f"two_pass_loudnorm: pass2 failed rc={r2.returncode}: {_serr}")
+            if os.path.isfile(tmp_out):
+                try: os.remove(tmp_out)
+                except Exception: pass
+            return False
+    except Exception as e:
+        logging.warning(f"two_pass_loudnorm: pass2 exception: {e}")
+        return False
+
+
 def _compile_highlight(clips, clip_duration, output_path, transition,
                        transition_dur, resolution, progress_cb=None,
                        audio_mode="original", loudnorm_params=None,
-                       name_tag=None):
-    """用 FFmpeg 把片段合成精華影片"""
+                       name_tag=None, cover_photo=None, cover_duration=1.0,
+                       bgm_path=None, bgm_volume=1.0, bgm_start=0.0,
+                       color_normalize=True,
+                       enhance=False, stabilize=False,
+                       interpolate_60fps=False, upscale_target=None,
+                       two_pass_loudnorm=True):
+    """用 FFmpeg 把片段合成精華影片
+
+    新增參數：
+      bgm_path: 背景音樂檔案（wav/mp3/flac/m4a）。提供時：
+                - 若 audio_mode in ("mute","bgm")：成品音軌 = 純 BGM
+                - 若 audio_mode == "bgm+source" 或 "original": BGM 鋪底 + 來源音訊 duck -12dB
+                - clip 長度會吸附到 BGM downbeat 間距，讓剪接點落在節拍上
+      bgm_volume: BGM 增益倍率（1.0 = 原始，0.7 = -3dB，0.5 = -6dB）
+      bgm_start: BGM 從第幾秒開始取（跳過前奏）
+      color_normalize: 啟用 CLAHE + gamma 微調，讓跨來源色調一致
+      enhance: Wave 5 C3 - 每段加 hqdn3d 輕降噪 + unsharp 銳化
+      stabilize: Wave 6 C5 - 對晃度適中的段落做 vidstab 2-pass 穩定
+      interpolate_60fps: Wave 6 C6 - 成品以 minterpolate 升至 60fps
+      upscale_target: Wave 6 C4 - 若來源 < 720p，升頻到此目標（"720p"/"1080p"/"auto"/None）
+      two_pass_loudnorm: Wave 4 F1 - 成品做 two-pass EBU R128 loudnorm（audio_mode!=mute 才跑）
+    """
     ffmpeg = _get_ffmpeg()
-    import tempfile, subprocess
+    import tempfile, subprocess, math
+
+    # ── Wave 1 A2 / Wave 3 B3: BGM 節拍分析 ──
+    bgm_beat_grid = None  # np.ndarray cut_grid (每幾拍切一次的時間點)
+    bgm_bpm = None
+    bgm_energy_times = None  # Wave 4 E1
+    bgm_energy_values = None
+    if bgm_path and os.path.isfile(bgm_path):
+        try:
+            _, _cut_grid, _bpm, _bpc = _extract_bgm_beat_grid(bgm_path, clip_duration)
+            if _cut_grid is not None and len(_cut_grid) >= 2:
+                bgm_beat_grid = _cut_grid
+                bgm_bpm = _bpm
+                logging.info(f"bgm beat grid ready: {len(_cut_grid)} cut points, "
+                             f"bpm={_bpm:.1f}")
+        except Exception as _bgm_e:
+            logging.warning(f"bgm beat analysis failed: {_bgm_e}")
+        # Wave 4 E1: BGM 能量曲線（chorus-adaptive cut length 用）
+        try:
+            _etimes, _evals = _analyze_bgm_energy(bgm_path)
+            if _etimes is not None and _evals is not None and len(_evals) >= 3:
+                bgm_energy_times = _etimes
+                bgm_energy_values = _evals
+                _hi = float(np.sum(_evals >= 0.75)) / len(_evals)
+                _lo = float(np.sum(_evals < 0.35)) / len(_evals)
+                logging.info(f"bgm energy ready: {len(_evals)} frames, "
+                             f"chorus≈{_hi*100:.0f}% verse≈{_lo*100:.0f}%")
+        except Exception as _ee:
+            logging.warning(f"bgm energy analysis failed: {_ee}")
+
+    # ── Wave 3 B3: BGM 存在時縮短轉場時長（flash cut）──
+    # 節拍切換用短轉場（100~150ms）比長 crossfade 更有節奏感；節拍本身會遮住切點
+    _orig_xfade_dur = transition_dur
+    if bgm_beat_grid is not None and transition == "crossfade" and transition_dur > 0.2:
+        transition_dur = min(transition_dur, 0.15)
+        logging.info(f"BGM present: xfade tightened from {_orig_xfade_dur:.2f}s → "
+                     f"{transition_dur:.2f}s (flash cut)")
 
     logging.info(f"compile_highlight: {len(clips)} clips, clip_dur={clip_duration}, "
-                 f"transition={transition}, resolution={resolution}, audio={audio_mode}")
+                 f"transition={transition}, resolution={resolution}, audio={audio_mode}, "
+                 f"bgm={'ON' if bgm_path else 'OFF'}, color_norm={color_normalize}")
 
     res_map = {"720p": (1280, 720), "1080p": (1920, 1080),
                 "720p_v": (720, 1280), "1080p_v": (1080, 1920)}
     tw, th = res_map.get(resolution, (1280, 720))
+
+    # ── BGM 模式下的音訊策略 ──
+    # 支援三種：
+    #   "bgm"        → source 完全靜音，成品只有 BGM
+    #   "bgm+source" → BGM 鋪底 + source 以 -12dB duck 混入
+    #   else (original/mute) → 保留舊行為（不覆蓋 source 音軌）
+    _has_bgm = bgm_path and os.path.isfile(bgm_path)
+    _bgm_duck_source = (audio_mode == "bgm+source") and _has_bgm
+    _bgm_only = (audio_mode == "bgm") and _has_bgm
+    # 若使用者選 "bgm" 但沒提供 BGM，自動退回 mute
+    if audio_mode in ("bgm", "bgm+source") and not _has_bgm:
+        logging.warning(f"audio_mode={audio_mode} but no BGM supplied, fallback to mute")
+        audio_mode = "mute"
 
     temp_dir = tempfile.mkdtemp()
     try:
@@ -4990,10 +7655,35 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
         # 快取各來源影片的實際時長，避免重複探測
         _src_dur_cache = {}
         seg_files = []
-        # ── Clip duration variation ──
-        # 節奏變化：短-長交替，讓剪接有呼吸感
-        # 第一個片段永遠是「標準長度」確保強 hook；後面套用節奏 pattern
+        # ── Clip duration：BGM 優先（吸附到 downbeat 間距），否則用 rhythm pattern ──
         _rhythm_pattern = [1.0, 0.8, 1.15, 0.75, 1.2, 0.85, 1.1, 0.9]
+
+        def _target_duration_for(idx, clips_total):
+            """決定第 idx 個 clip 的目標時長（秒）。
+
+            Wave 4 E1：若 BGM 能量 >= 0.75（副歌），縮短至約 1/2 拍（快切）；
+            若 < 0.35（主歌/bridge），拉長至 1.4×（慢切）。
+            """
+            if idx == 0:
+                return clip_duration  # 第 0 個保持標準長度做 hook
+            if bgm_beat_grid is not None and len(bgm_beat_grid) >= idx + 1:
+                # 用 BGM 的相鄰 cut_grid 間距
+                diff = float(bgm_beat_grid[idx] - bgm_beat_grid[idx - 1])
+                if 1.2 <= diff <= 5.0:
+                    if bgm_energy_times is not None:
+                        _t = float(bgm_beat_grid[idx - 1])
+                        _e = _bgm_energy_at(bgm_energy_times, bgm_energy_values, _t)
+                        if _e >= 0.75:
+                            diff *= 0.5   # chorus: faster cuts
+                        elif _e >= 0.55:
+                            diff *= 0.75
+                        elif _e < 0.35:
+                            diff *= 1.4   # quiet verse: slower cuts
+                        diff = max(1.5, min(5.0, diff))
+                    return diff
+            # fallback rhythm pattern
+            return max(1.5, clip_duration * _rhythm_pattern[(idx - 1) % len(_rhythm_pattern)])
+
         for i, clip in enumerate(clips):
             seg_path = os.path.join(temp_dir, f"clip_{i:04d}.mp4")
             start = max(0, clip["time"] - 0.3)
@@ -5004,11 +7694,7 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
                 _src_dur_cache[src_video] = _probe_duration(ffmpeg, src_video)
             src_dur = _src_dur_cache[src_video]
 
-            # 節奏變化：第 0 個用標準長度（hook），其餘套 pattern
-            if i == 0:
-                target_dur = clip_duration
-            else:
-                target_dur = clip_duration * _rhythm_pattern[(i - 1) % len(_rhythm_pattern)]
+            target_dur = _target_duration_for(i, len(clips))
             target_dur = max(1.5, target_dur)  # 下限 1.5 秒
 
             actual_clip_dur = target_dur
@@ -5023,41 +7709,180 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
                 actual_clip_dur = min(target_dur, available)
 
             # 統一畫布合成
-            # 若來源是橫式 (W > H) 且目標是垂直 (tw < th)，用 face-centered crop
-            # 填滿畫面並把臉放在上三分點（垂直視覺層級法則）；肩膀以上保留
+            # ── 偵測靜態浮水印 / 頻道 logo，生成 delogo 前綴（來源座標）──
+            _wm_boxes = _detect_watermark_regions(src_video)
+            _wm_prefix = ""
+            if _wm_boxes:
+                _src_w_for_wm = None
+                _src_h_for_wm = None
+                try:
+                    _cap_wm = cv2.VideoCapture(src_video)
+                    _src_w_for_wm = int(_cap_wm.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    _src_h_for_wm = int(_cap_wm.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    _cap_wm.release()
+                except Exception:
+                    _src_w_for_wm = _src_h_for_wm = 0
+                # ── Face-overlap veto：delogo 不可覆蓋到偵測到的人臉 ──
+                _face_bboxes = []
+                try:
+                    _cap_f = cv2.VideoCapture(src_video)
+                    _fw = int(_cap_f.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    _fh = int(_cap_f.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    _fps_f = _cap_f.get(cv2.CAP_PROP_FPS) or 25.0
+                    _det = cv2.FaceDetectorYN.create(YUNET_MODEL, "", (_fw, _fh), 0.5, 0.3, 5000)
+                    # 在 clip 區間的前、中、後三個時間點取樣
+                    for _ft in (clip["time"], clip["time"] + actual_clip_dur / 2, clip["time"] + actual_clip_dur - 0.1):
+                        _cap_f.set(cv2.CAP_PROP_POS_FRAMES, int(max(0, _ft) * _fps_f))
+                        _ok, _fr = _cap_f.read()
+                        if not _ok or _fr is None:
+                            continue
+                        _, _fcs = _det.detect(_fr)
+                        if _fcs is None:
+                            continue
+                        for _f in _fcs:
+                            # 輕微外擴頭髮/下巴；不要到頭頂以上太多
+                            _pad_x = _f[2] * 0.08
+                            _pad_y_top = _f[3] * 0.10
+                            _pad_y_bot = _f[3] * 0.15
+                            _face_bboxes.append((
+                                _f[0] - _pad_x, _f[1] - _pad_y_top,
+                                _f[0] + _f[2] + _pad_x, _f[1] + _f[3] + _pad_y_bot))
+                    _cap_f.release()
+                except Exception:
+                    _face_bboxes = []
+
+                def _overlap_ratio(wx, wy, ww, wh):
+                    """回傳 watermark 與任一張臉的最大重疊面積比例（佔 watermark 面積）"""
+                    w_area = max(1, ww * wh)
+                    best = 0.0
+                    for fx1, fy1, fx2, fy2 in _face_bboxes:
+                        ix1 = max(wx, fx1); iy1 = max(wy, fy1)
+                        ix2 = min(wx + ww, fx2); iy2 = min(wy + wh, fy2)
+                        if ix2 > ix1 and iy2 > iy1:
+                            r = ((ix2 - ix1) * (iy2 - iy1)) / w_area
+                            if r > best: best = r
+                    return best
+
+                _wm_boxes_safe = []
+                for _b in _wm_boxes:
+                    _ratio = _overlap_ratio(*_b)
+                    if _ratio > 0.25:
+                        logging.info(f"  delogo box {_b} skipped: {_ratio*100:.0f}% overlaps face")
+                        continue
+                    _wm_boxes_safe.append(_b)
+                _wm_boxes = tuple(_wm_boxes_safe)
+
+                # ── 先嘗試 LaMA 局部 inpainting ──
+                _lama_src = None
+                if _wm_boxes and _get_lama() is not None:
+                    _lama_out = os.path.join(temp_dir, f"clip_{i:04d}_lama.mp4")
+                    _lama_ok = _lama_clean_segment(
+                        src_video, start, actual_clip_dur,
+                        list(_wm_boxes), _lama_out, ffmpeg=ffmpeg)
+                    if _lama_ok and os.path.exists(_lama_out) and os.path.getsize(_lama_out) > 1000:
+                        _lama_src = _lama_out
+
+                if _lama_src:
+                    # LaMA 成功：swap 來源，skip delogo 前綴
+                    src_video = _lama_src
+                    start = 0.0
+                    clip = dict(clip); clip["time"] = 0.0
+                    _wm_prefix = ""
+                else:
+                    # Fallback：FFmpeg delogo
+                    _parts = []
+                    for (wx, wy, ww, wh) in _wm_boxes:
+                        wx = max(1, wx - 3)
+                        wy = max(1, wy - 3)
+                        ww += 6
+                        wh += 6
+                        if _src_w_for_wm and wx + ww >= _src_w_for_wm:
+                            ww = _src_w_for_wm - wx - 1
+                        if _src_h_for_wm and wy + wh >= _src_h_for_wm:
+                            wh = _src_h_for_wm - wy - 1
+                        if ww < 4 or wh < 4:
+                            continue
+                        _parts.append(f"delogo=x={wx}:y={wy}:w={ww}:h={wh}")
+                    if _parts:
+                        _wm_prefix = ",".join(_parts) + ","
+
+            # 若來源是橫式 (W > H) 且目標是垂直 (tw < th)，用 face-TRACKED crop
+            # (FACE_TRACK_V1) 逐幀偵測 + 雙向 smoothing → sendcmd 餵 FFmpeg 每幀 x/y
             # 否則用原本的 blurred background + fit-within 方案
             _face_crop_chain = None
+            _face_sendcmd_path = None
             if tw < th:  # 目標是直式
-                _fc = _detect_face_center(src_video, clip["time"] + actual_clip_dur / 2,
-                                          clip_dur=actual_clip_dur)
-                if _fc is not None:
-                    _cx, _cy, _sw, _sh = _fc
-                    if _sw > _sh:  # 來源是橫式才做 face crop
-                        # 等比縮放到「剛好覆蓋」目標畫布
-                        _scale = max(tw / _sw, th / _sh)
-                        _nw = int(_sw * _scale)
-                        _nh = int(_sh * _scale)
+                _track, _sw, _sh = _detect_face_track(
+                    src_video, clip["time"], actual_clip_dur)
+                if _track and _sw > _sh:
+                    # 等比縮放到「剛好覆蓋」目標畫布
+                    _scale = max(tw / _sw, th / _sh)
+                    _nw = int(_sw * _scale)
+                    _nh = int(_sh * _scale)
+                    import tempfile as _tmf
+                    _lines = []
+                    for _rel_t, _cx, _cy in _track:
                         _cx_s = _cx * _scale
                         _cy_s = _cy * _scale
-                        # 水平：臉置中；垂直：臉置於上三分點
-                        _cx_crop = max(0, min(_nw - tw, int(_cx_s - tw / 2)))
-                        _cy_crop = max(0, min(_nh - th, int(_cy_s - th / 3)))
-                        _face_crop_chain = (
-                            f"[0:v]scale={_nw}:{_nh},"
-                            f"crop={tw}:{th}:{_cx_crop}:{_cy_crop},"
-                            f"setpts=PTS-STARTPTS"
-                        )
+                        # 三分法構圖：水平置中；垂直置於上 1/3（經典電影/肖像取景）
+                        # 把臉部中心放在 th/3 從頂，眼睛大約會落在上三分線上
+                        _xc = max(0, min(_nw - tw, int(_cx_s - tw / 2)))
+                        _yc = max(0, min(_nh - th, int(_cy_s - th / 3)))
+                        _lines.append(f"{_rel_t:.3f} crop x {_xc};")
+                        _lines.append(f"{_rel_t:.3f} crop y {_yc};")
+                    _fd, _face_sendcmd_path = _tmf.mkstemp(
+                        suffix=".sendcmd", prefix="crop_", dir=temp_dir)
+                    with os.fdopen(_fd, 'w', encoding='utf-8') as _sf:
+                        _sf.write("\n".join(_lines))
+                    # FFmpeg filter 內的路徑需要把冒號跳脫
+                    _fp = _face_sendcmd_path.replace("\\", "/").replace(":", r"\:")
+                    _face_crop_chain = (
+                        f"[0:v]{_wm_prefix}scale={_nw}:{_nh},"
+                        f"sendcmd=f='{_fp}',crop={tw}:{th}:0:0,"
+                        f"setpts=PTS-STARTPTS"
+                    )
 
             if _face_crop_chain is not None:
                 _base_chain = _face_crop_chain
             else:
                 _base_chain = (
-                    f"[0:v]split=2[main][bg];"
+                    f"[0:v]{_wm_prefix}split=2[main][bg];"
                     f"[bg]scale={tw}:{th}:force_original_aspect_ratio=increase,"
                     f"crop={tw}:{th},boxblur=20:5[blur];"
                     f"[main]scale={tw}:{th}:force_original_aspect_ratio=decrease[fg];"
                     f"[blur][fg]overlay=(W-w)/2:(H-h)/2,setpts=PTS-STARTPTS"
                 )
+            # ── B2: 色彩 / 曝光正規化 ──
+            # 讓不同來源（官攝 vs 電視台 vs fancam）的色調更一致。
+            # 做法：
+            #   - eq 濾鏡微調 gamma、saturation；避免過度。
+            #   - 亮度修正：依來源亮度 vs 目標 50% 差異補償。
+            # 為保守起見，只做 **輕度** 修正。太重會毀畫面。
+            _color_chain = ""
+            if color_normalize:
+                # 量測來源中段一幀的平均亮度 (0~255)
+                try:
+                    _cap_b = cv2.VideoCapture(src_video)
+                    _cap_b.set(cv2.CAP_PROP_POS_MSEC, (start + actual_clip_dur / 2) * 1000)
+                    _okb, _frb = _cap_b.read()
+                    _cap_b.release()
+                    if _okb and _frb is not None:
+                        _mean_y = float(cv2.cvtColor(_frb, cv2.COLOR_BGR2YUV)[:, :, 0].mean())
+                        # 目標 Y = 118（稍亮於中灰，偏向人像標準）
+                        # brightness delta in [-0.05, +0.05]
+                        _br = max(-0.05, min(0.05, (118.0 - _mean_y) / 1200.0))
+                    else:
+                        _br = 0.0
+                except Exception:
+                    _br = 0.0
+                # eq: contrast=1.03, brightness=_br, saturation=1.05, gamma=1.00
+                _color_chain = f",eq=contrast=1.03:brightness={_br:.3f}:saturation=1.05"
+
+            # Wave 5 C3: 輕降噪 + 銳化（UI toggle）
+            _enhance_chain = ""
+            if enhance:
+                _enhance_chain = ",hqdn3d=1.5:1.5:6:6,unsharp=5:5:0.6:5:5:0.0"
+
             if name_tag:
                 # 用 drawtext 疊字：右上角，半透明黑底，白字
                 # 過濾掉 drawtext 不喜歡的字元
@@ -5072,9 +7897,9 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
                     f"box=1:boxcolor=black@0.5:boxborderw={_pad}:"
                     f"x={_x}:y={_y}"
                 )
-                vf_complex = _base_chain + drawtext + "[outv]"
+                vf_complex = _base_chain + _color_chain + _enhance_chain + drawtext + "[outv]"
             else:
-                vf_complex = _base_chain + "[outv]"
+                vf_complex = _base_chain + _color_chain + _enhance_chain + "[outv]"
             cmd = [
                 ffmpeg, "-y",
                 "-ss", f"{start:.2f}",
@@ -5108,6 +7933,9 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
                 seg_path,
             ]
             r = subprocess.run(cmd, capture_output=True, timeout=120)
+            if _face_sendcmd_path:
+                try: os.remove(_face_sendcmd_path)
+                except Exception: pass
             if os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0:
                 # 驗證擷取出的片段沒有凍結（檢查實際長度）
                 seg_dur = _probe_duration(ffmpeg, seg_path)
@@ -5115,6 +7943,36 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
                     logging.warning(f"  clip {i}: too short ({seg_dur:.1f}s), skip")
                     os.remove(seg_path)
                 else:
+                    # Wave 6 C5: 對晃度適中（A4 shake 5~9）的段落做 vidstab 2-pass
+                    if stabilize:
+                        _shk = clip.get("_shake")
+                        if _shk is not None and 5.0 <= float(_shk) <= 9.0:
+                            _trf_path = seg_path + ".trf"
+                            _stab_out = seg_path + ".stab.mp4"
+                            try:
+                                _rc1 = subprocess.run(
+                                    [ffmpeg, "-y", "-i", seg_path,
+                                     "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={_trf_path}",
+                                     "-f", "null", "-"],
+                                    capture_output=True, timeout=180)
+                                if _rc1.returncode == 0 and os.path.isfile(_trf_path):
+                                    _rc2 = subprocess.run(
+                                        [ffmpeg, "-y", "-i", seg_path,
+                                         "-vf", f"vidstabtransform=input={_trf_path}:smoothing=30:crop=keep,unsharp=5:5:0.8:3:3:0.4",
+                                         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                                         "-c:a", "copy", "-pix_fmt", "yuv420p",
+                                         _stab_out],
+                                        capture_output=True, timeout=180)
+                                    if _rc2.returncode == 0 and os.path.isfile(_stab_out) and os.path.getsize(_stab_out) > 1024:
+                                        os.replace(_stab_out, seg_path)
+                                        logging.info(f"  clip {i}: vidstab applied (shake={_shk:.2f})")
+                            except Exception as _vse:
+                                logging.warning(f"  clip {i}: vidstab failed: {_vse}")
+                            finally:
+                                for _p in (_trf_path, _stab_out):
+                                    if os.path.isfile(_p):
+                                        try: os.remove(_p)
+                                        except Exception: pass
                     seg_files.append(seg_path)
                     logging.info(f"  clip {i}: {os.path.getsize(seg_path)/1024:.0f}KB "
                                  f"({seg_dur:.1f}s) from {os.path.basename(src_video)} "
@@ -5133,6 +7991,83 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
 
         # Phase 2: 合成
         has_audio = (audio_mode != "mute")
+
+        # ── 封面圖：在所有片段之前插入一張 N 秒的靜止畫面 ──
+        # 用途：TikTok / YouTube 會取「影片第一幀」當自動縮圖，放一張漂亮的照片
+        # 當封面可以大幅提高點擊率。
+        _pending_cover_seg = None
+        if cover_photo and os.path.isfile(cover_photo):
+            try:
+                cover_seg = os.path.join(temp_dir, "clip_cover.mp4")
+                # 相同的 scale+pad 邏輯跟其他 seg 一致，確保 xfade 串接不出錯
+                vf_cover = (f"scale={tw}:{th}:force_original_aspect_ratio=increase,"
+                            f"crop={tw}:{th},setsar=1,fps=30,format=yuv420p")
+                # 單一幀模式：< 0.1s 一律當作「只要封面不要播放」，用單幀
+                # 單幀 @ 30fps ≈ 33ms，觀眾肉眼幾乎無感，但仍是影片的第一幀
+                # → TikTok / YouTube 自動抓首幀當縮圖時會用到這張
+                _cd = float(cover_duration) if cover_duration is not None else 0.0
+                _single_frame = (_cd < 0.1)
+
+                cmd_cover = [
+                    ffmpeg, "-y",
+                    "-loop", "1",
+                    "-framerate", "30",
+                    "-i", cover_photo,
+                ]
+                if _single_frame:
+                    # 若主影片有聲軌，封面也要有（靜音）以便 concat 一致
+                    if has_audio:
+                        cmd_cover += [
+                            "-f", "lavfi",
+                            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                        ]
+                    cmd_cover += [
+                        "-frames:v", "1",
+                        "-vf", vf_cover,
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        "-r", "30",
+                    ]
+                    if has_audio:
+                        # 單幀影片的音軌長度 = 1 幀 ≈ 1/30s
+                        cmd_cover += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
+                    else:
+                        cmd_cover += ["-an"]
+                else:
+                    if has_audio:
+                        cmd_cover += [
+                            "-f", "lavfi",
+                            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                        ]
+                    cmd_cover += [
+                        "-t", f"{_cd:.2f}",
+                        "-vf", vf_cover,
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        "-r", "30",
+                    ]
+                    if has_audio:
+                        cmd_cover += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
+                    else:
+                        cmd_cover += ["-an"]
+                cmd_cover.append(cover_seg)
+
+                rc = subprocess.run(cmd_cover, capture_output=True, timeout=60)
+                if rc.returncode == 0 and os.path.isfile(cover_seg) and os.path.getsize(cover_seg) > 0:
+                    # 不放進 seg_files（xfade 會過濾 < 0.5s 的片段，單幀會被丟掉）
+                    # 改成記下來，等主體影片合成完後再做一次 concat 把它接在前面
+                    _pending_cover_seg = cover_seg
+                    _mode_label = "1-frame (~33ms)" if _single_frame else f"{_cd:.2f}s"
+                    logging.info(f"cover photo built (will prepend post-concat): "
+                                 f"{os.path.basename(cover_photo)} "
+                                 f"({_mode_label}, {os.path.getsize(cover_seg)/1024:.0f}KB)")
+                else:
+                    _pending_cover_seg = None
+                    logging.warning(f"cover photo build failed rc={rc.returncode}: "
+                                    f"{rc.stderr[-300:] if rc.stderr else b''}")
+            except Exception as _cover_e:
+                _pending_cover_seg = None
+                logging.warning(f"cover photo skipped: {_cover_e}")
         if transition == "crossfade" and len(seg_files) > 1 and transition_dur > 0:
             # xfade 鏈式過場
             result = _xfade_concat(ffmpeg, seg_files, clip_duration,
@@ -5160,6 +8095,149 @@ def _compile_highlight(clips, clip_duration, output_path, transition,
             r = subprocess.run(cmd, capture_output=True, timeout=300)
             logging.info(f"concat rc={r.returncode}")
             result = output_path
+
+        # ── 封面後置合併：把單獨編碼好的 cover_seg 接在主體前面 ──
+        # 這個步驟獨立於 xfade / concat 之外，因此單幀封面不會被 xfade 的
+        # duration 過濾器 (< 0.5s) 丟掉。
+        if _pending_cover_seg and os.path.isfile(output_path):
+            try:
+                _tmp_merged = output_path + ".withcover.mp4"
+                _list_cover = os.path.join(temp_dir, "list_cover.txt")
+                with open(_list_cover, "w", encoding="utf-8") as _lf:
+                    for _sp in (_pending_cover_seg, output_path):
+                        _safe = _sp.replace("\\", "/").replace("'", "'\\''")
+                        _lf.write(f"file '{_safe}'\n")
+                _cmd_merge = [
+                    ffmpeg, "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", _list_cover,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-r", "30", "-pix_fmt", "yuv420p",
+                ]
+                if has_audio:
+                    _cmd_merge += ["-c:a", "aac", "-b:a", "128k", "-ar", "44100"]
+                else:
+                    _cmd_merge += ["-an"]
+                _cmd_merge.append(_tmp_merged)
+                _rm = subprocess.run(_cmd_merge, capture_output=True, timeout=300)
+                if _rm.returncode == 0 and os.path.isfile(_tmp_merged) and os.path.getsize(_tmp_merged) > 1024:
+                    os.replace(_tmp_merged, output_path)
+                    logging.info(f"cover prepended post-concat: "
+                                 f"final {os.path.getsize(output_path)/1024/1024:.1f}MB")
+                else:
+                    logging.warning(f"cover post-concat failed rc={_rm.returncode}: "
+                                    f"{_rm.stderr[-300:] if _rm.stderr else b''}")
+                    if os.path.isfile(_tmp_merged):
+                        try: os.remove(_tmp_merged)
+                        except Exception: pass
+            except Exception as _mce:
+                logging.warning(f"cover post-concat exception: {_mce}")
+
+        # ── Wave 3 D1: BGM overlay（鋪底 + 可選 duck）──
+        # 在所有其他處理完成之後，把 BGM 疊到最終 output_path 上。
+        # 模式：
+        #   _bgm_only      → 音軌 = BGM（loudnorm）；來源音訊丟棄
+        #   _bgm_duck_source → 音軌 = BGM + 來源 -12dB（sidechain 壓縮可選，先用簡單 mix）
+        if _has_bgm and os.path.isfile(output_path) and (_bgm_only or _bgm_duck_source):
+            try:
+                _vid_dur = _probe_duration(ffmpeg, output_path) or 0
+                _tmp_bgm = output_path + ".bgm.mp4"
+                # BGM loudnorm 目標：-14 LUFS（跟 source 同標準）
+                _lI = (loudnorm_params or {}).get("I", -14)
+                _lTP = (loudnorm_params or {}).get("TP", -1.5)
+                _lLRA = (loudnorm_params or {}).get("LRA", 11)
+
+                # 淡入 0.3s / 淡出 0.5s，避免突兀開場/結尾
+                _fade_out_start = max(0, _vid_dur - 0.5) if _vid_dur else 0
+                _vol_db = 20 * math.log10(max(bgm_volume, 0.01)) if bgm_volume > 0 else 0
+
+                if _bgm_only:
+                    # BGM 獨家：忽略 output 的音軌，只用 BGM
+                    _bgm_af = (
+                        f"atrim=start={float(bgm_start):.2f},"
+                        f"asetpts=PTS-STARTPTS,"
+                        f"afade=t=in:st=0:d=0.3,"
+                        + (f"afade=t=out:st={_fade_out_start:.2f}:d=0.5,"
+                           if _fade_out_start > 0 else "")
+                        + f"loudnorm=I={_lI}:TP={_lTP}:LRA={_lLRA},"
+                        f"volume={_vol_db:+.1f}dB"
+                    )
+                    _cmd_bgm = [
+                        ffmpeg, "-y",
+                        "-i", output_path,
+                        "-i", bgm_path,
+                        "-filter_complex",
+                        f"[1:a]{_bgm_af}[aout]",
+                        "-map", "0:v",
+                        "-map", "[aout]",
+                        "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                        "-shortest",
+                        _tmp_bgm,
+                    ]
+                else:
+                    # BGM + 來源混音（來源 ducking 到 -12dB）
+                    _bgm_af = (
+                        f"[1:a]atrim=start={float(bgm_start):.2f},"
+                        f"asetpts=PTS-STARTPTS,"
+                        f"afade=t=in:st=0:d=0.3,"
+                        + (f"afade=t=out:st={_fade_out_start:.2f}:d=0.5,"
+                           if _fade_out_start > 0 else "")
+                        + f"loudnorm=I={_lI}:TP={_lTP}:LRA={_lLRA},"
+                        f"volume={_vol_db:+.1f}dB[bgm]"
+                    )
+                    _src_af = "[0:a]volume=-12dB,aresample=async=1:first_pts=0[src]"
+                    _mix = "[bgm][src]amix=inputs=2:duration=shortest:dropout_transition=0[aout]"
+                    _cmd_bgm = [
+                        ffmpeg, "-y",
+                        "-i", output_path,
+                        "-i", bgm_path,
+                        "-filter_complex",
+                        f"{_bgm_af};{_src_af};{_mix}",
+                        "-map", "0:v",
+                        "-map", "[aout]",
+                        "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                        "-shortest",
+                        _tmp_bgm,
+                    ]
+
+                _rb = subprocess.run(_cmd_bgm, capture_output=True, timeout=360)
+                if (_rb.returncode == 0 and os.path.isfile(_tmp_bgm)
+                        and os.path.getsize(_tmp_bgm) > 1024):
+                    os.replace(_tmp_bgm, output_path)
+                    logging.info(f"BGM overlay done ({'only' if _bgm_only else 'duck+mix'}): "
+                                 f"{os.path.getsize(output_path)/1024/1024:.1f}MB")
+                else:
+                    _serr = (_rb.stderr[-500:] if _rb.stderr else b'').decode(errors='replace')
+                    logging.warning(f"BGM overlay failed rc={_rb.returncode}: {_serr}")
+                    if os.path.isfile(_tmp_bgm):
+                        try: os.remove(_tmp_bgm)
+                        except Exception: pass
+            except Exception as _bgm_e:
+                logging.warning(f"BGM overlay exception: {_bgm_e}")
+
+        # ── Wave 6 C4: Real-ESRGAN / Lanczos 升頻（若來源解析度 < target）──
+        if upscale_target and os.path.isfile(output_path):
+            try:
+                _upscale_final_video(output_path, upscale_target, ffmpeg=ffmpeg,
+                                      has_audio=has_audio)
+            except Exception as _up_e:
+                logging.warning(f"upscale skipped: {_up_e}")
+
+        # ── Wave 6 C6: minterpolate 升至 60fps ──
+        if interpolate_60fps and os.path.isfile(output_path):
+            try:
+                _interpolate_to_60fps(output_path, ffmpeg=ffmpeg, has_audio=has_audio)
+            except Exception as _ie:
+                logging.warning(f"interpolate_60fps skipped: {_ie}")
+
+        # ── Wave 4 F1: 成品整片 two-pass loudnorm（audio_mode != mute 才跑）──
+        if two_pass_loudnorm and os.path.isfile(output_path) and audio_mode != "mute":
+            try:
+                _two_pass_loudnorm(output_path)
+            except Exception as _ln_e:
+                logging.warning(f"two_pass_loudnorm skipped: {_ln_e}")
 
         if os.path.isfile(output_path):
             final_dur = _probe_duration(ffmpeg, output_path)
@@ -5369,7 +8447,7 @@ def api_yt_highlight():
         return jsonify({"error": "沒有可用的擷取影片"}), 400
 
     # 讀取選項
-    audio_mode = data.get("audio_mode", "original")  # original / mute
+    audio_mode = data.get("audio_mode", "original")  # original / mute / bgm / bgm+source
     strategy = data.get("strategy", "balanced")
     clip_duration = float(data.get("clip_duration", 3))
     total_duration = float(data.get("total_duration", 30))
@@ -5377,6 +8455,24 @@ def api_yt_highlight():
     transition = data.get("transition", "crossfade")
     transition_dur = float(data.get("transition_dur", 0.5))
     resolution = data.get("resolution", "720p")
+
+    # BGM 選項
+    bgm_path = _resolve_bgm_path(data.get("bgm_path") or data.get("bgm"))
+    try:
+        bgm_volume = float(data.get("bgm_volume", 1.0))
+    except Exception:
+        bgm_volume = 1.0
+    try:
+        bgm_start = float(data.get("bgm_start", 0.0))
+    except Exception:
+        bgm_start = 0.0
+
+    # Wave 5/6 進階選項
+    enhance = bool(data.get("enhance", False))
+    stabilize = bool(data.get("stabilize", False))
+    interpolate_60fps = bool(data.get("interpolate_60fps", False))
+    upscale_target = (data.get("upscale_target") or "").strip() or None
+    two_pass_loudnorm_opt = bool(data.get("two_pass_loudnorm", True))
 
     task_id = str(uuid.uuid4())[:8]
     q = Queue()
@@ -5417,7 +8513,8 @@ def api_yt_highlight():
             clips = _select_highlight_clips(all_scores, clip_duration,
                                             adjusted_total, max_per_video,
                                             person=person,
-                                            prefer_vertical=resolution.endswith("_v"))
+                                            prefer_vertical=resolution.endswith("_v"),
+                                            bgm_path=bgm_path)
             if not clips:
                 q.put({"type": "error", "message": "找不到符合條件的片段"})
                 return
@@ -5443,6 +8540,10 @@ def api_yt_highlight():
                 clips, clip_duration, out_path, transition,
                 transition_dur, resolution, compile_cb,
                 audio_mode=audio_mode,
+                bgm_path=bgm_path, bgm_volume=bgm_volume, bgm_start=bgm_start,
+                enhance=enhance, stabilize=stabilize,
+                interpolate_60fps=interpolate_60fps, upscale_target=upscale_target,
+                two_pass_loudnorm=two_pass_loudnorm_opt,
             )
 
             if result and os.path.isfile(result):
@@ -5555,24 +8656,87 @@ def api_yt_highlight_videos(person):
 auto_video_tasks = {}
 auto_video_tasks_lock = threading.Lock()
 
-# 任務歷史（保留最近完成/失敗的任務結果，供重連用）
+# 任務歷史（保留最近完成/失敗的任務結果，供重連 + 頁面重開用）
+# 持久化到 disk（JSON），Flask 重啟或 deploy 不會消失
 auto_video_history = {}  # task_id -> {status, label, result_data, ts}
 _AV_HISTORY_MAX = 50
+_AV_HISTORY_CUTOFF_SEC = 7 * 24 * 3600  # 7 天後才清
+_AV_HISTORY_LOCK = threading.Lock()
+_AV_HISTORY_PATH = os.path.join(APP_DATA_DIR, "auto_video_history.json")
+
+
+def _av_load_history():
+    """啟動時從 disk 載入歷史。已不存在的輸出檔案會被跳過。"""
+    global auto_video_history
+    if not os.path.isfile(_AV_HISTORY_PATH):
+        return
+    try:
+        with open(_AV_HISTORY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+        cutoff = time.time() - _AV_HISTORY_CUTOFF_SEC
+        cleaned = {}
+        for tid, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            if v.get("ts", 0) < cutoff:
+                continue
+            # Flask 重啟後，任何 "running" 都已是 orphan（執行緒已死）→ 轉成 error
+            if v.get("status") == "running":
+                v = dict(v)
+                v["status"] = "error"
+                v["data"] = {"message": "Flask 重啟，任務已中斷"}
+            # done 狀態但輸出檔已被刪 → 跳過（避免 UI 出現死連結）
+            if v.get("status") == "done":
+                rel = (v.get("data") or {}).get("rel_path")
+                if rel:
+                    full = os.path.join(YT_ROOT, rel.replace("/", os.sep))
+                    if not os.path.isfile(full):
+                        continue
+            cleaned[tid] = v
+        auto_video_history = cleaned
+        logging.info(f"auto-video history loaded: {len(cleaned)} entries from {_AV_HISTORY_PATH}")
+    except Exception as e:
+        logging.warning(f"auto-video history load failed: {e}")
+
+
+def _av_persist_history_nolock():
+    """把記憶體 dict 寫到 disk（呼叫者需已拿 lock）。"""
+    try:
+        tmp = _AV_HISTORY_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(auto_video_history, f, ensure_ascii=False)
+        os.replace(tmp, _AV_HISTORY_PATH)
+    except Exception as e:
+        logging.warning(f"auto-video history persist failed: {e}")
 
 
 def _av_save_history(task_id, status, label, data=None):
-    """儲存任務最終狀態到歷史"""
-    auto_video_history[task_id] = {
-        "status": status,  # "running" | "preview" | "done" | "error"
-        "label": label,
-        "data": data or {},
-        "ts": time.time(),
-    }
-    # 清理太舊的（超過 1 小時）
-    cutoff = time.time() - 3600
-    old = [k for k, v in auto_video_history.items() if v["ts"] < cutoff]
-    for k in old:
-        auto_video_history.pop(k, None)
+    """儲存任務最終狀態到歷史 + 持久化到 disk"""
+    with _AV_HISTORY_LOCK:
+        auto_video_history[task_id] = {
+            "status": status,  # "running" | "preview" | "done" | "error" | "cancelled"
+            "label": label,
+            "data": data or {},
+            "ts": time.time(),
+        }
+        # 時間 cutoff：> 7 天的清掉
+        cutoff = time.time() - _AV_HISTORY_CUTOFF_SEC
+        old = [k for k, v in auto_video_history.items() if v.get("ts", 0) < cutoff]
+        for k in old:
+            auto_video_history.pop(k, None)
+        # 數量 cap：超過 _AV_HISTORY_MAX 就丟掉最舊的
+        if len(auto_video_history) > _AV_HISTORY_MAX:
+            items = sorted(auto_video_history.items(), key=lambda kv: kv[1].get("ts", 0))
+            drop_n = len(auto_video_history) - _AV_HISTORY_MAX
+            for k, _ in items[:drop_n]:
+                auto_video_history.pop(k, None)
+        _av_persist_history_nolock()
+
+
+# 啟動時載入歷史
+_av_load_history()
 
 
 @app.route("/api/auto-video/tasks")
@@ -5678,7 +8842,10 @@ def api_auto_video():
         logging.info(f"auto_mode ON for {person}: {smart_defaults}")
 
     extra_keyword = (data.get("search_keyword") or "").strip()
-    search_keyword = f"{person} {extra_keyword}".strip() if extra_keyword else person
+    # 衝突名字：person 可能是 'Chaeyoung_TWICE' — 搜尋詞用 "TWICE Chaeyoung"
+    _disp_p, _grp_p = _split_person_key(person)
+    _base_q = (f"{_grp_p} {_disp_p}".strip() if _grp_p else _disp_p) if _disp_p != person else person
+    search_keyword = f"{_base_q} {extra_keyword}".strip() if extra_keyword else _base_q
     max_videos = int(data.get("max_videos", 5))
     clip_duration = float(data.get("clip_duration", 3))
     total_duration = float(data.get("total_duration", 30))
@@ -5688,6 +8855,13 @@ def api_auto_video():
     resolution = data.get("resolution", "720p_v")  # 預設直式
     audio_mode = data.get("audio_mode", "original")
     platform = data.get("platform", "tiktok")
+    # 複選支援：如果傳了 platforms=[...]（長度≥2）就視為子集合合併
+    _plat_raw = data.get("platforms") or []
+    platforms = [p for p in _plat_raw if isinstance(p, str) and p in ("tiktok","youtube","yt_shorts","ig_reels")] if isinstance(_plat_raw, list) else []
+    if len(platforms) >= 2:
+        platform = "custom"  # pipeline 內會檢查 platforms 走子集合分支
+    elif len(platforms) == 1:
+        platform = platforms[0]
     video_type = data.get("video_type", "all")
     # 舞台 / 直拍類型：硬否決會狠狠砍幀，需要更多素材池才湊得滿目標長度
     if video_type in ("stage", "fancam"):
@@ -5711,6 +8885,29 @@ def api_auto_video():
     source = data.get("source", "online")  # online / local
     preview = data.get("preview", False)
     output_preset = (data.get("output_preset") or "").strip().lower()
+    cover_photo = (data.get("cover_photo") or "").strip() or None
+    try:
+        cover_duration = float(data.get("cover_duration", 1.0))
+    except Exception:
+        cover_duration = 1.0
+
+    # BGM 選項
+    bgm_path = _resolve_bgm_path(data.get("bgm_path") or data.get("bgm"))
+    try:
+        bgm_volume = float(data.get("bgm_volume", 1.0))
+    except Exception:
+        bgm_volume = 1.0
+    try:
+        bgm_start = float(data.get("bgm_start", 0.0))
+    except Exception:
+        bgm_start = 0.0
+
+    # Wave 5/6 進階選項
+    enhance = bool(data.get("enhance", False))
+    stabilize = bool(data.get("stabilize", False))
+    interpolate_60fps = bool(data.get("interpolate_60fps", False))
+    upscale_target = (data.get("upscale_target") or "").strip() or None
+    two_pass_loudnorm_opt = bool(data.get("two_pass_loudnorm", True))
 
     # 套用平台預設：覆寫 resolution 與 total_duration，loudnorm 由 preset 決定
     loudnorm_params = None
@@ -5739,12 +8936,15 @@ def api_auto_video():
     if preview:
         task_label += " [挑選模式]"
 
+    cancel_event = threading.Event()
     with auto_video_tasks_lock:
         auto_video_tasks[task_id] = {
             "queue": q, "status": "running",
             "confirm_event": confirm_event,
             "confirm_data": confirm_data,
+            "cancel_event": cancel_event,
             "label": task_label,
+            "started_at": time.time(),
         }
     _av_save_history(task_id, "running", task_label)
 
@@ -5754,12 +8954,25 @@ def api_auto_video():
                 q, resolved_person, search_keyword, max_videos,
                 clip_duration, total_duration, strategy, transition,
                 transition_dur, resolution, audio_mode, platform,
+                platforms=platforms,
                 video_type=video_type, source=source,
                 preview=preview, confirm_event=confirm_event,
                 confirm_data=confirm_data,
                 task_id=task_id, task_label=task_label,
                 loudnorm_params=loudnorm_params,
+                cover_photo=cover_photo, cover_duration=cover_duration,
+                cancel_event=cancel_event,
+                bgm_path=bgm_path, bgm_volume=bgm_volume, bgm_start=bgm_start,
+                enhance=enhance, stabilize=stabilize,
+                interpolate_60fps=interpolate_60fps,
+                upscale_target=upscale_target,
+                two_pass_loudnorm=two_pass_loudnorm_opt,
             )
+        except _AvCancelled:
+            logging.info(f"auto-video task {task_id} cancelled by user")
+            q.put({"type": "cancelled", "message": "已中止"})
+            q.put({"type": "error", "message": "已中止"})
+            _av_save_history(task_id, "cancelled", task_label, {"message": "使用者中止"})
         except Exception as e:
             import traceback
             logging.error(f"auto-video error: {traceback.format_exc()}")
@@ -5771,17 +8984,181 @@ def api_auto_video():
     return jsonify({"task_id": task_id, "label": task_label})
 
 
+class _AvCancelled(Exception):
+    """使用者中止一鍵影片任務（pipeline 內部 checkpoint 拋出）。"""
+    pass
+
+
 def _auto_video_pipeline(q, person, search_keyword, max_videos,
                           clip_duration, total_duration, strategy,
                           transition, transition_dur, resolution,
-                          audio_mode, platform, video_type="all",
+                          audio_mode, platform, platforms=None,
+                          video_type="all",
                           source="online", preview=False,
                           confirm_event=None, confirm_data=None,
                           task_id=None, task_label=None,
-                          loudnorm_params=None):
+                          loudnorm_params=None,
+                          cover_photo=None, cover_duration=1.0,
+                          cancel_event=None,
+                          bgm_path=None, bgm_volume=1.0, bgm_start=0.0,
+                          enhance=False, stabilize=False,
+                          interpolate_60fps=False, upscale_target=None,
+                          two_pass_loudnorm=True):
     """完整 pipeline：搜尋 → 下載 → 擷取 → 精華剪輯（或本地影片 → 擷取 → 精華剪輯）"""
     import subprocess
     import random as _random
+
+    def _check_cancel():
+        """檢查是否被使用者中止；若中止則拋出 _AvCancelled。"""
+        if cancel_event is not None and cancel_event.is_set():
+            raise _AvCancelled()
+
+    # ── 解析使用者挑選的封面圖路徑 ──
+    # cover_photo 可以是：
+    #   a) "__auto__" → 自動挑 person 資料夾第一張照片
+    #   b) 檔名（例如 "photo_001.jpg"，從前端 /api/images/<person> 回傳的 filename）
+    #   c) /photos/<person>/<file> 形式的 URL
+    #   d) 絕對路徑（不建議，但支援）
+    # 一律收斂到實際檔案系統路徑，且限制在 DOWNLOAD_ROOT/<person>/ 底下以防路徑穿越
+    #
+    # cover_duration: 允許 0 或極小值 → 單一幀模式（影片幾乎不顯示，只影響平台自動縮圖）
+    _cover_photo_path = None
+    try:
+        _cover_dur_raw = float(cover_duration) if cover_duration is not None else 0.0
+    except Exception:
+        _cover_dur_raw = 0.0
+    # 負值視為 0；超過 5s 截斷為 5s
+    _cover_dur = max(0.0, min(5.0, _cover_dur_raw))
+    # 小於 0.1s 一律走「單一幀」模式
+    _cover_single_frame = (_cover_dur < 0.1)
+
+    def _auto_pick_first_photo(_person):
+        # 從該成員的照片資料夾隨機挑一張（每次生成都不同，避免同一團成員封面都長一樣）
+        try:
+            _folder = os.path.join(DOWNLOAD_ROOT, sanitize_name(_person))
+            if not os.path.isdir(_folder):
+                return None
+            _exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+            _cands = [f for f in os.listdir(_folder)
+                      if os.path.splitext(f)[1].lower() in _exts
+                      and not f.startswith(".")]
+            if not _cands:
+                return None
+            _chosen = _random.choice(_cands)
+            return os.path.join(_folder, _chosen)
+        except Exception:
+            return None
+
+    def _auto_pick_best_cover(_person, max_candidates=30):
+        """Wave 4 C7: 從該成員照片資料夾挑「最適合當封面」的一張。
+
+        評分：face_area_ratio × centering × sharpness。
+        失敗或沒有可判讀的人臉時 fallback 到 _auto_pick_first_photo。
+        """
+        try:
+            _folder = os.path.join(DOWNLOAD_ROOT, sanitize_name(_person))
+            if not os.path.isdir(_folder):
+                return None
+            _exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+            _cands = [f for f in os.listdir(_folder)
+                      if os.path.splitext(f)[1].lower() in _exts
+                      and not f.startswith(".")]
+            if not _cands:
+                return None
+            # 取檔案大小前 max_candidates 張（通常高品質 = 大檔）
+            _cands.sort(key=lambda n: -os.path.getsize(os.path.join(_folder, n)))
+            _cands = _cands[:max_candidates]
+
+            best = None
+            best_score = -1.0
+            for _fn in _cands:
+                _fp = os.path.join(_folder, _fn)
+                try:
+                    _img = cv2.imread(_fp)
+                    if _img is None:
+                        continue
+                    _h, _w = _img.shape[:2]
+                    if _h < 300 or _w < 300:
+                        continue
+                    _img_area = float(_h * _w)
+                    _det = cv2.FaceDetectorYN.create(YUNET_MODEL, "", (_w, _h), 0.6, 0.3, 5000)
+                    _, _faces = _det.detect(_img)
+                    if _faces is None or len(_faces) == 0:
+                        continue
+                    # 取最大臉
+                    _faces_sorted = sorted(_faces, key=lambda f: f[2] * f[3], reverse=True)
+                    _f = _faces_sorted[0]
+                    _fx, _fy, _fw, _fh = float(_f[0]), float(_f[1]), float(_f[2]), float(_f[3])
+                    # 1) face area ratio（0.03~0.35 最佳；過小=遠景，過大=過近）
+                    _far = (_fw * _fh) / _img_area
+                    if _far < 0.02 or _far > 0.45:
+                        continue
+                    _area_score = 1.0 - abs(_far - 0.12) / 0.12
+                    _area_score = max(0.1, min(1.0, _area_score))
+                    # 2) centering（face center 距離畫面中心）
+                    _cx = (_fx + _fw / 2) / _w
+                    _cy = (_fy + _fh / 2) / _h
+                    _center_dist = ((_cx - 0.5) ** 2 + (_cy - 0.4) ** 2) ** 0.5
+                    _center_score = max(0.2, 1.0 - _center_dist * 1.5)
+                    # 3) sharpness（face 區域 Laplacian variance）
+                    _x1 = max(0, int(_fx)); _y1 = max(0, int(_fy))
+                    _x2 = min(_w, int(_fx + _fw)); _y2 = min(_h, int(_fy + _fh))
+                    if _x2 <= _x1 or _y2 <= _y1:
+                        continue
+                    _roi = cv2.cvtColor(_img[_y1:_y2, _x1:_x2], cv2.COLOR_BGR2GRAY)
+                    _lap_var = float(cv2.Laplacian(_roi, cv2.CV_64F).var())
+                    _sharp_score = min(1.0, _lap_var / 300.0)  # 300 以上都算很銳利
+                    if _sharp_score < 0.1:
+                        continue
+                    # 多臉扣分（solo 封面較好）
+                    _face_cnt_penalty = 1.0 if len(_faces) == 1 else 0.75
+                    _score = _area_score * _center_score * _sharp_score * _face_cnt_penalty
+                    if _score > best_score:
+                        best_score = _score
+                        best = _fp
+                except Exception:
+                    continue
+            if best:
+                logging.info(f"cover pick (smart): {os.path.basename(best)} "
+                             f"score={best_score:.3f}")
+                return best
+            # fallback
+            return _auto_pick_first_photo(_person)
+        except Exception as _ace:
+            logging.warning(f"auto_pick_best_cover failed: {_ace}; fallback random")
+            return _auto_pick_first_photo(_person)
+
+    if cover_photo:
+        try:
+            _cp_raw = str(cover_photo).strip()
+            if _cp_raw == "__auto__":
+                _cp_candidate = _auto_pick_best_cover(person)
+                if _cp_candidate is None:
+                    logging.info(f"cover_photo __auto__: no photos for {person}, skipping cover")
+                else:
+                    logging.info(f"cover_photo __auto__ picked: {_cp_candidate}")
+            elif _cp_raw.startswith("/photos/"):
+                # URL 形式：/photos/<celeb>/<file>
+                _cp_rel = _cp_raw[len("/photos/"):]
+                _cp_celeb, _, _cp_file = _cp_rel.partition("/")
+                _cp_candidate = os.path.join(DOWNLOAD_ROOT, _cp_celeb, _cp_file)
+            elif os.path.isabs(_cp_raw):
+                _cp_candidate = _cp_raw
+            else:
+                # 只給檔名 → 放在當前 person 資料夾
+                _cp_candidate = os.path.join(DOWNLOAD_ROOT, sanitize_name(person),
+                                              os.path.basename(_cp_raw))
+            if _cp_candidate:
+                _cp_norm = os.path.normpath(_cp_candidate)
+                _root_norm = os.path.normpath(DOWNLOAD_ROOT)
+                if _cp_norm.startswith(_root_norm) and os.path.isfile(_cp_norm):
+                    _cover_photo_path = _cp_norm
+                    _mode_label = "1-frame" if _cover_single_frame else f"{_cover_dur:.2f}s"
+                    logging.info(f"cover_photo resolved: {_cp_norm} ({_mode_label})")
+                else:
+                    logging.warning(f"cover_photo rejected (outside DOWNLOAD_ROOT or missing): {_cp_raw}")
+        except Exception as _cpe:
+            logging.warning(f"cover_photo parse failed: {_cpe}")
 
     VIDEO_TYPE_KW = {
         "dance": "dance 舞蹈",
@@ -5819,7 +9196,7 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                          "뮤지컬", "musical", "연극", "musical theatre",
                          "musical theater", "curtain call", "커튼콜"],
             "min_duration": 45,
-            "max_duration": 900,
+            "max_duration": 360,
         },
         "dance": {
             "positive": ["dance", "안무", "choreography", "practice", "연습",
@@ -6002,9 +9379,15 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         else:
             # all / 未知類型
             variants = [p, f"{p} 4K", f"{p} {_year}", f"{p} best"]
-        # 隨機挑 3-4 個變體
+        # 依人物 × 類型輪替：每次跑取連續 4 個變體（wrap-around），下次前進 2 位
+        # 保證連續兩次執行拿到的變體組至少有 2 個不同
         n = min(4, len(variants))
-        return _random.sample(variants, n)
+        idx = _get_rotation_idx(person, f"qv_{vtype or 'all'}")
+        start = (idx * 2) % len(variants)
+        picked = [variants[(start + i) % len(variants)] for i in range(n)]
+        _bump_rotation_idx(person, f"qv_{vtype or 'all'}")
+        logging.info(f"query rotation for {person}/{vtype}: idx={idx} → {picked}")
+        return picked
 
     def _youtube_multi_search(base_kw, vtype, target_count, q_ch, shorts=False):
         """用多個查詢變體搜尋 YouTube，混用 ytsearch 和 ytsearchdate，合併去重。"""
@@ -6092,6 +9475,7 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                               f"請先用「線上搜尋」下載影片，或將影片放到 YouTube/downloads/{person_folder}/ 資料夾"})
             return
 
+        _check_cancel()
         type_label = VIDEO_TYPE_LABELS.get(video_type, video_type)
         total_local = len(local_videos)
         q.put({"type": "progress", "phase": "search", "percent": 5,
@@ -6194,11 +9578,60 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
             "tiktok": "TikTok", "youtube": "YouTube",
             "yt_shorts": "YouTube Shorts", "ig_reels": "Instagram Reels",
         }
-        platform_label = PLATFORM_LABELS.get(platform, platform)
+        if platform == "custom" and platforms:
+            platform_label = " + ".join(PLATFORM_LABELS.get(p, p) for p in platforms)
+        else:
+            platform_label = PLATFORM_LABELS.get(platform, platform)
+        _check_cancel()
         q.put({"type": "progress", "phase": "search", "percent": 0,
                "message": f"🔍 搜尋 {platform_label}: {actual_keyword}（目標 {search_count} 部，已有 {len(existing_ids)} 部）..."})
 
-        if platform == "all":
+        if platform == "custom" and platforms:
+            # 子集合合併：把 search_count 平均分配到選中的平台
+            _n = max(1, len(platforms))
+            _per = max(1, search_count // _n)
+            merged_results = []
+            seen_ids = set()
+
+            def _merge(batch, tag):
+                added = 0
+                for r in batch or []:
+                    rid = r.get("id") or r.get("url")
+                    if not rid or rid in seen_ids:
+                        continue
+                    seen_ids.add(rid)
+                    r["_src_platform"] = tag
+                    merged_results.append(r)
+                    added += 1
+                return added
+
+            q.put({"type": "progress", "phase": "search", "percent": 1,
+                   "message": f"🔍 子集合搜尋 {platform_label}（每平台 ~{_per} 部）..."})
+            _pct = 1
+            for plat in platforms:
+                _check_cancel()
+                _pct += 1
+                try:
+                    if plat == "tiktok":
+                        _b = _tiktok_search(actual_keyword, _per)
+                    elif plat == "yt_shorts":
+                        _b = _youtube_multi_search(search_keyword, video_type, _per, q, shorts=True)
+                    elif plat == "youtube":
+                        _b = _youtube_multi_search(search_keyword, video_type, _per, q, shorts=False)
+                    elif plat == "ig_reels":
+                        _b = []  # IG 需登入，子集合合併時預設跳過
+                        logging.info("custom-platform: IG Reels skipped (requires login)")
+                    else:
+                        _b = []
+                    q.put({"type": "progress", "phase": "search", "percent": _pct,
+                           "message": f"  {PLATFORM_LABELS.get(plat, plat)}：{_merge(_b, plat)} 部"})
+                except Exception as e:
+                    logging.warning(f"custom-platform: {plat} search failed: {e}")
+
+            search_results = merged_results
+            logging.info(f"custom-platform merged {len(search_results)} unique videos from {platforms}")
+
+        elif platform == "all":
             # 跨平台合併：平均分配 search_count 到 3 個核心來源
             # （Instagram 需登入容易失敗，不納入預設合併）
             _per = max(1, search_count // 3)
@@ -6391,9 +9824,11 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                         if img is None:
                             _errors.append(v)
                             continue
+                        # 縮圖門檻比 extract 稍低 (-0.05)：縮圖畫面通常比 extract 雜
+                        _thumb_thr = max(0.20, EXTRACT_CONFIG["similarity_threshold"] - 0.05)
                         status, score = _thumbnail_face_match(
                             img, _ref_for_thumb, _thumb_det, _thumb_rec,
-                            threshold=0.35, neg_embeddings=_neg_for_thumb)
+                            threshold=_thumb_thr, neg_embeddings=_neg_for_thumb)
                         v["_thumb_score"] = score
                         v["_thumb_status"] = status
                         if status == "match":
@@ -6437,7 +9872,14 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading as _threading
 
-        PARALLEL_DL = len(search_results)  # 全部同時下載
+        # 上限 4：YouTube 對同一 IP 開太多連線會 rate-limit（HTTP 429 / bot 防護），
+        # 尤其多人同時跑（6 人 × 30 影片 = 180 個 yt-dlp 一起連）幾乎必炸。
+        # 可透過環境變數 AUTO_VIDEO_PARALLEL_DL 覆寫。
+        try:
+            _cap = int(os.environ.get("AUTO_VIDEO_PARALLEL_DL", "4"))
+        except Exception:
+            _cap = 4
+        PARALLEL_DL = max(1, min(len(search_results), _cap))
 
         # 每個下載任務的進度追蹤
         _dl_progress = {}  # vi -> {pct, speed, eta}
@@ -6489,13 +9931,23 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                             pass
 
             out_tpl = os.path.join(dl_dir, "%(id)s.%(ext)s")
+            # YouTube 自 2024 末起對匿名 IP 強制要求 cookies（"Sign in to confirm you're not a bot"）。
+            # 繞法：指定多個 player_client，讓 yt-dlp 從「不需登入」的 client 合出可用 format。
+            # - mweb: mobile web, 有 video-only + audio-only 的分離 stream
+            # - android: 預合併的 mp4（360p / 720p）作為 fallback
+            # - web_safari: Safari UA 的 client，format pool 不一樣
+            # 可透過環境變數 YT_PLAYER_CLIENTS 覆寫。
+            _pc = os.environ.get("YT_PLAYER_CLIENTS", "mweb,android,web_safari")
             cmd = [
                 sys.executable, "-m", "yt_dlp",
                 "--no-playlist", "--windows-filenames", "--restrict-filenames",
                 "--file-access-retries", "10",
-                "-f", "best[height<=720]/best",
+                # bv*+ba/best: 任意 best video + best audio，高度限制移除（mweb 可能沒有 720p 以下）
+                "-f", "bv*[height<=720]+ba/best[height<=720]/bv*+ba/best",
+                "--merge-output-format", "mp4",
                 "-o", out_tpl, "--newline", "--no-warnings",
                 "--write-info-json",  # 寫 {id}.info.json 讓後續擷取文案用
+                "--extractor-args", f"youtube:player_client={_pc}",
             ]
             if FFMPEG_LOCATION:
                 cmd += ["--ffmpeg-location", FFMPEG_LOCATION]
@@ -6505,6 +9957,7 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
 
             _dl_ok = False
             for _attempt in range(2):
+                _last_lines = []  # 保留最後幾行 yt-dlp 輸出供 debug
                 try:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -6513,6 +9966,10 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                     )
                     for raw_line in proc.stdout:
                         line = raw_line.decode("utf-8", errors="replace").strip()
+                        if line:
+                            _last_lines.append(line)
+                            if len(_last_lines) > 20:
+                                _last_lines.pop(0)
                         m = re.search(r'\[download\]\s+([\d.]+)%', line)
                         if m:
                             dl_pct = min(int(float(m.group(1))), 99)
@@ -6532,7 +9989,13 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                     if proc.returncode == 0:
                         _dl_ok = True
                         break
-                    logging.warning(f"auto-video dl[{vi}] attempt {_attempt+1} failed")
+                    # 取最後幾行有錯誤關鍵字的輸出寫進 log
+                    _err_lines = [l for l in _last_lines
+                                  if any(k in l for k in ('ERROR', 'error', 'HTTP', '429',
+                                                          '403', 'Sign in', 'unavailable',
+                                                          'Unable to', 'failed'))]
+                    _tail = " | ".join(_err_lines[-3:]) or (_last_lines[-1] if _last_lines else "")
+                    logging.warning(f"auto-video dl[{vi}] attempt {_attempt+1} failed rc={proc.returncode}: {_tail[:400]}")
                 except subprocess.TimeoutExpired:
                     logging.warning(f"auto-video dl[{vi}] timeout attempt {_attempt+1}")
                     try:
@@ -6549,9 +10012,14 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
 
             # 找到下載的檔案
             actual_file = None
+            def _safe_mtime(x):
+                try:
+                    return os.path.getmtime(os.path.join(dl_dir, x))
+                except OSError:
+                    return 0  # 檔案在 exists/getmtime 之間被 rename（yt-dlp .part → .mp4）
             if vid_id:
                 for f in sorted(os.listdir(dl_dir),
-                                key=lambda x: (os.path.getmtime(os.path.join(dl_dir, x)) if os.path.exists(os.path.join(dl_dir, x)) else 0),
+                                key=_safe_mtime,
                                 reverse=True):
                     fp_c = os.path.join(dl_dir, f)
                     if (os.path.isfile(fp_c) and vid_id in f
@@ -6593,6 +10061,11 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
             futures = {executor.submit(_download_one, vi, v): vi
                        for vi, v in enumerate(search_results)}
             for future in as_completed(futures):
+                if cancel_event is not None and cancel_event.is_set():
+                    # 取消剩下還沒跑的 future
+                    for f in futures:
+                        f.cancel()
+                    raise _AvCancelled()
                 result = future.result()
                 if result:
                     downloaded_files.append(result)
@@ -6649,9 +10122,14 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                 q.put({"type": "progress", "phase": "photos", "percent": 38,
                        "message": f"📸 照片下載完成（新增 {img_dl.stats['downloaded']} 張）"})
                 # 清除 embedding 快取，讓新照片生效
-                cache_path = os.path.join(photo_dir, ".face_embeddings.npy")
-                if os.path.isfile(cache_path):
-                    os.remove(cache_path)
+                # 註：新 cache 機制有 fingerprint 自動失效，這裡其實可以省略，
+                # 但顯式移除可以避免 race condition（下游讀 cache 時可能剛好命中舊 mtime）
+                for _p in (".face_embeddings.npy", ".face_embeddings.meta.json",
+                           ".face_embeddings.review.json"):
+                    fp = os.path.join(photo_dir, _p)
+                    if os.path.isfile(fp):
+                        try: os.remove(fp)
+                        except OSError: pass
             else:
                 q.put({"type": "progress", "phase": "photos", "percent": 38,
                        "message": f"⚠️ 無法從網路下載照片，嘗試用現有 {existing_photos} 張"})
@@ -6668,6 +10146,7 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
     os.makedirs(extract_dir, exist_ok=True)
 
     # 總是建立人臉特徵（Phase 4 精華評分也需要用來辨認目標人物）
+    _check_cancel()
     q.put({"type": "progress", "phase": "extract", "percent": 38,
            "message": f"🧑 建立 {person} 的臉部特徵..."})
 
@@ -6720,94 +10199,153 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         extracted_files = list(already_extracted)  # 先加入已有的
 
         scan_list = need_extract if need_extract else downloaded_files
-        for vi, dlf in enumerate(scan_list):
+
+        # 並行加速 #3：face-extract 階段改成 ThreadPoolExecutor
+        # _scan_video_for_person 內部呼叫 _build_face_models()，每次都是獨立的
+        # YuNet + SFace，不會踩到 OpenCV DNN 的 thread-safety 問題。
+        # max_workers=3：與 scoring 階段同一量級，配合 cv2.setNumThreads(10)
+        # 可讓單機 ~7 核同時吃滿；再多會被 I/O / ffmpeg 子行程爭搶抵銷。
+        _ref_sig_outer = _embeddings_sig(ref)
+        _neg_sig_outer = _embeddings_sig(neg_ref)
+        _extract_new = {}  # vi -> result_path
+        _extract_lock = threading.Lock()
+        _ex_total = len(scan_list)
+        _ex_done_counter = [0]
+        # 並行回報進度聚合：各 worker 目前分析到的 pct（vi -> 0~1），完成後移除
+        _active_ex_pcts = {}
+        _last_reported_ex_p = [42]  # 單調遞增下限，避免前後抖動
+
+        def _extract_one(vi, dlf):
             video_path = dlf["full_path"]
             vname = dlf["filename"]
-            pct_base = 42 + int(vi / max(len(scan_list), 1) * 23)
+
+            with _extract_lock:
+                _active_ex_pcts[vi] = 0.0
+                partial = _ex_done_counter[0] + sum(_active_ex_pcts.values())
+                pct_base = 42 + int(partial / max(_ex_total, 1) * 23)
+                pct_base = min(pct_base, 65)
+                if pct_base < _last_reported_ex_p[0]:
+                    pct_base = _last_reported_ex_p[0]
+                else:
+                    _last_reported_ex_p[0] = pct_base
 
             q.put({"type": "progress", "phase": "extract", "percent": pct_base,
-                   "message": f"🔍 掃描 {vi+1}/{len(scan_list)}: {vname[:40]}..."})
+                   "message": f"🔍 掃描 {vi+1}/{_ex_total}: {vname[:40]}..."})
 
-            def scan_cb(pct, _vi=vi):
-                p = 42 + int((_vi + pct) / max(len(scan_list), 1) * 23)
-                q.put({"type": "progress", "phase": "extract", "percent": min(p, 65),
+            def scan_cb(pct):
+                with _extract_lock:
+                    _active_ex_pcts[vi] = pct
+                    partial = _ex_done_counter[0] + sum(_active_ex_pcts.values())
+                    new_p = 42 + int(partial / max(_ex_total, 1) * 23)
+                    new_p = min(new_p, 65)
+                    if new_p < _last_reported_ex_p[0]:
+                        new_p = _last_reported_ex_p[0]
+                    else:
+                        _last_reported_ex_p[0] = new_p
+                q.put({"type": "progress", "phase": "extract", "percent": new_p,
                        "message": f"掃描 {vname[:30]}... {int(pct*100)}%"})
 
-            # Per-video 快取：若影片未改且 ref/neg 特徵沒變就直接用快取
-            _ref_sig = _embeddings_sig(ref)
-            _neg_sig = _embeddings_sig(neg_ref)
-            _cached = _load_video_cache(video_path)
-            timestamps = None
-            if (_cached and _cached.get("ref_sig") == _ref_sig
-                    and _cached.get("neg_sig") == _neg_sig
-                    and "timestamps" in _cached):
-                timestamps = _cached["timestamps"]
-                q.put({"type": "progress", "phase": "extract", "percent": pct_base + 2,
-                       "message": f"⚡ {vname[:40]} 快取命中（{len(timestamps)} 個時間點）"})
-            else:
-                try:
-                    timestamps = _scan_video_for_person(video_path, ref, scan_cb,
-                                                          neg_embeddings=neg_ref)
-                    _save_video_cache(video_path, {
-                        "ref_sig": _ref_sig, "neg_sig": _neg_sig,
-                        "timestamps": timestamps,
-                    })
-                except Exception as _se:
-                    logging.warning(f"scan failed for {vname}: {_se}")
-                    q.put({"type": "progress", "phase": "extract", "percent": pct_base + 4,
-                           "message": f"⚠️ {vname[:40]} 掃描失敗，略過（{_se}）"})
-                    continue
-            if not timestamps:
-                q.put({"type": "progress", "phase": "extract", "percent": pct_base + 4,
-                       "message": f"⏭️ {vname[:40]} 中未偵測到 {person}"})
-                continue
-
-            segments = _merge_segments(timestamps)
-
-            # 取得來源影片時長，修剪過於接近結尾的片段（避免 TikTok 片尾）
-            _src_dur = None
             try:
-                _cap = cv2.VideoCapture(video_path)
-                if _cap.isOpened():
-                    _fps = _cap.get(cv2.CAP_PROP_FPS) or 30
-                    _fc = _cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                    _src_dur = _fc / _fps if _fps > 0 else None
-                    _cap.release()
-            except Exception:
-                pass
-            if _src_dur and _src_dur > 10:
-                cutoff = _src_dur - 5.0  # 最後 5 秒視為片尾區域
-                trimmed = []
-                for s, e in segments:
-                    if s >= cutoff:
-                        continue  # 整段都在片尾區
-                    e = min(e, cutoff)
-                    if e - s >= 1.0:
-                        trimmed.append((s, e))
-                segments = trimmed
-                if not segments:
+                # Per-video 快取：若影片未改且 ref/neg 特徵沒變就直接用快取
+                _cached = _load_video_cache(video_path)
+                timestamps = None
+                if (_cached and _cached.get("ref_sig") == _ref_sig_outer
+                        and _cached.get("neg_sig") == _neg_sig_outer
+                        and "timestamps" in _cached):
+                    timestamps = _cached["timestamps"]
+                    q.put({"type": "progress", "phase": "extract", "percent": pct_base + 2,
+                           "message": f"⚡ {vname[:40]} 快取命中（{len(timestamps)} 個時間點）"})
+                else:
+                    try:
+                        timestamps = _scan_video_for_person(video_path, ref, scan_cb,
+                                                              neg_embeddings=neg_ref)
+                        _save_video_cache(video_path, {
+                            "ref_sig": _ref_sig_outer, "neg_sig": _neg_sig_outer,
+                            "timestamps": timestamps,
+                        })
+                    except Exception as _se:
+                        logging.warning(f"scan failed for {vname}: {_se}")
+                        q.put({"type": "progress", "phase": "extract", "percent": pct_base + 4,
+                               "message": f"⚠️ {vname[:40]} 掃描失敗，略過（{_se}）"})
+                        return
+                if not timestamps:
                     q.put({"type": "progress", "phase": "extract", "percent": pct_base + 4,
-                           "message": f"⏭️ {vname[:40]}: 片段都在片尾區，跳過"})
-                    continue
+                           "message": f"⏭️ {vname[:40]} 中未偵測到 {person}"})
+                    return
 
-            total_dur = sum(e - s for s, e in segments)
+                segments = _merge_segments(timestamps)
 
-            base = os.path.splitext(os.path.basename(vname))[0]
-            out_name_ext = f"{base}_{sanitize_name(person)}.mp4"
-            vtype = _infer_video_type_from_path(video_path, sanitize_name(person))
-            if vtype:
-                _typed_extract_dir = os.path.join(extract_dir, vtype)
-            else:
-                _typed_extract_dir = extract_dir
-            os.makedirs(_typed_extract_dir, exist_ok=True)
-            out_path = os.path.join(_typed_extract_dir, out_name_ext)
-            result = _extract_segments(video_path, segments, out_path)
+                # 取得來源影片時長，修剪過於接近結尾的片段（避免 TikTok 片尾）
+                _src_dur = None
+                try:
+                    _cap = cv2.VideoCapture(video_path)
+                    if _cap.isOpened():
+                        _fps = _cap.get(cv2.CAP_PROP_FPS) or 30
+                        _fc = _cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                        _src_dur = _fc / _fps if _fps > 0 else None
+                        _cap.release()
+                except Exception:
+                    pass
+                if _src_dur and _src_dur > 10:
+                    cutoff = _src_dur - 5.0
+                    trimmed = []
+                    for s, e in segments:
+                        if s >= cutoff:
+                            continue
+                        e = min(e, cutoff)
+                        if e - s >= 1.0:
+                            trimmed.append((s, e))
+                    segments = trimmed
+                    if not segments:
+                        q.put({"type": "progress", "phase": "extract", "percent": pct_base + 4,
+                               "message": f"⏭️ {vname[:40]}: 片段都在片尾區，跳過"})
+                        return
 
-            if result and os.path.isfile(result):
-                extracted_files.append(result)
-                q.put({"type": "progress", "phase": "extract",
-                       "percent": 42 + int((vi + 1) / max(len(scan_list), 1) * 23),
-                       "message": f"✅ 擷取 {len(segments)} 段（{total_dur:.1f}秒）from {vname[:30]}"})
+                total_dur = sum(e - s for s, e in segments)
+
+                base = os.path.splitext(os.path.basename(vname))[0]
+                out_name_ext = f"{base}_{sanitize_name(person)}.mp4"
+                vtype = _infer_video_type_from_path(video_path, sanitize_name(person))
+                if vtype:
+                    _typed_extract_dir = os.path.join(extract_dir, vtype)
+                else:
+                    _typed_extract_dir = extract_dir
+                # mkdir 可能被多 thread 同時呼叫，exist_ok 保證安全
+                os.makedirs(_typed_extract_dir, exist_ok=True)
+                out_path = os.path.join(_typed_extract_dir, out_name_ext)
+                result = _extract_segments(video_path, segments, out_path)
+
+                if result and os.path.isfile(result):
+                    with _extract_lock:
+                        _extract_new[vi] = result
+                        _done_p = 42 + int((_ex_done_counter[0] + 1) / max(_ex_total, 1) * 23)
+                        _done_p = min(_done_p, 65)
+                        if _done_p < _last_reported_ex_p[0]:
+                            _done_p = _last_reported_ex_p[0]
+                        else:
+                            _last_reported_ex_p[0] = _done_p
+                    q.put({"type": "progress", "phase": "extract",
+                           "percent": _done_p,
+                           "message": f"✅ 擷取 {len(segments)} 段（{total_dur:.1f}秒）from {vname[:30]}"})
+            finally:
+                with _extract_lock:
+                    _ex_done_counter[0] += 1
+                    _active_ex_pcts.pop(vi, None)
+
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+        _ex_workers = min(3, max(1, _ex_total))
+        logging.info(f"face-extract: {_ex_total} videos with {_ex_workers} parallel workers")
+        with _TPE(max_workers=_ex_workers, thread_name_prefix="extract") as _exe:
+            _futs = [_exe.submit(_extract_one, vi, dlf)
+                     for vi, dlf in enumerate(scan_list)]
+            for _f in _ac(_futs):
+                try: _f.result()
+                except Exception as _fe:
+                    logging.warning(f"extract worker crashed: {_fe}")
+
+        # 依原始順序把新擷取的影片附加到 extracted_files（已有的在前）
+        for _vi in sorted(_extract_new.keys()):
+            extracted_files.append(_extract_new[_vi])
 
     if not extracted_files:
         q.put({"type": "error", "message": f"所有影片中都未偵測到 {person}"})
@@ -6817,23 +10355,51 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
            "message": f"🎯 擷取完成：{len(extracted_files)} 個影片包含 {person}"})
 
     # ── Phase 4: 精華剪輯 (70-100%) ──
+    _check_cancel()
     q.put({"type": "progress", "phase": "highlight", "percent": 70,
            "message": "🎬 分析影片，挑選精彩片段..."})
 
-    all_scores = []
+    all_scores_map = {}  # vi -> (vpath, scores)
     _score_ref_sig = _embeddings_sig(ref)
     _score_neg_sig = _embeddings_sig(neg_ref)
     _cache_hits = 0
-    for vi, vpath in enumerate(extracted_files):
+    _cache_hits_lock = threading.Lock()
+    # Per-video 快取：若影片、ref/neg、strategy、scoring 版本都沒變才用快取
+    # _SCORE_VERSION: 每次改 scoring 邏輯就遞增，讓舊快取失效
+    _SCORE_VERSION = 6  # v6: 加入畫質懲罰（暗/過曝/模糊扣分）
+
+    # 並行加速 #2：把 scoring 迴圈改成 ThreadPoolExecutor（3 個 worker）
+    # _score_video_highlights 內部自己 build 一份 detector+recognizer（見 _build_face_models），
+    # 因此每個 thread 都有獨立的 YuNet / SFace 實例，不會踩到 thread-safety。
+    # max_workers=3：配合 cv2/torch 10 核心，避免過度爭搶導致 context switch 抖動。
+    _total_vids = len(extracted_files)
+    _done_counter = [0]
+    _done_lock = threading.Lock()
+    # 各 worker 目前分析到的 pct（vi -> 0~1），完成後從 dict 移除
+    _active_pcts = {}
+    _last_reported_p = [70]  # 單調遞增下限，不讓進度條回退
+
+    def _score_one(vi, vpath):
+        nonlocal _cache_hits
         vname = os.path.basename(vpath)
-        def score_cb(pct, _vi=vi):
-            p = 70 + int((_vi + pct) / len(extracted_files) * 15)
-            q.put({"type": "progress", "phase": "highlight", "percent": min(p, 85),
+
+        # 進度條防抖動：
+        # - partial = 完成數 + 所有 active worker 當下 pct 的總和
+        #   （比「最後一個 worker 的 pct」更穩定，反映整體進度）
+        # - 強制單調遞增：不讓 p 回退，避免多 worker 各報各的造成前後跳
+        def score_cb(pct):
+            with _done_lock:
+                _active_pcts[vi] = pct
+                partial = _done_counter[0] + sum(_active_pcts.values())
+                new_p = 70 + int(partial / max(_total_vids, 1) * 15)
+                new_p = min(new_p, 85)
+                if new_p < _last_reported_p[0]:
+                    new_p = _last_reported_p[0]  # 不回退
+                else:
+                    _last_reported_p[0] = new_p
+            q.put({"type": "progress", "phase": "highlight", "percent": new_p,
                    "message": f"分析 {vname[:30]}... {int(pct*100)}%"})
 
-        # Per-video 快取：若影片、ref/neg、strategy、scoring 版本都沒變才用快取
-        # _SCORE_VERSION: 每次改 scoring 邏輯就遞增，讓舊快取失效
-        _SCORE_VERSION = 5
         scores = None
         _cached = _load_video_cache(vpath)
         if (_cached and _cached.get("score_ref_sig") == _score_ref_sig
@@ -6842,7 +10408,8 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                 and _cached.get("score_version") == _SCORE_VERSION
                 and "scores" in _cached):
             scores = _cached["scores"]
-            _cache_hits += 1
+            with _cache_hits_lock:
+                _cache_hits += 1
         else:
             try:
                 scores = _score_video_highlights(vpath, strategy, score_cb,
@@ -6858,11 +10425,31 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
             except Exception as _se:
                 logging.warning(f"score failed for {vname}: {_se}")
                 q.put({"type": "progress", "phase": "highlight",
-                       "percent": 70 + int((vi + 1) / max(len(extracted_files), 1) * 15),
+                       "percent": 70 + int((vi + 1) / max(_total_vids, 1) * 15),
                        "message": f"⚠️ {vname[:40]} 評分失敗，略過"})
                 scores = None
-        if scores:
-            all_scores.append((vpath, scores))
+
+        with _done_lock:
+            _done_counter[0] += 1
+            _active_pcts.pop(vi, None)  # 完成後從 active 清掉，避免重複計入
+        return vi, vpath, scores
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    _score_workers = min(3, max(1, _total_vids))
+    logging.info(f"scoring {_total_vids} videos with {_score_workers} parallel workers")
+    with ThreadPoolExecutor(max_workers=_score_workers, thread_name_prefix="score") as _ex:
+        _futures = [_ex.submit(_score_one, vi, vpath)
+                    for vi, vpath in enumerate(extracted_files)]
+        for _fut in as_completed(_futures):
+            try:
+                vi, vpath, scores = _fut.result()
+                if scores:
+                    all_scores_map[vi] = (vpath, scores)
+            except Exception as _fe:
+                logging.warning(f"score worker crashed: {_fe}")
+
+    # 還原原始順序（以 vi 為 key），後面的 clip 挑選邏輯可能依賴輸入順序的可預測性
+    all_scores = [all_scores_map[vi] for vi in sorted(all_scores_map.keys())]
 
     if _cache_hits > 0:
         q.put({"type": "progress", "phase": "highlight", "percent": 85,
@@ -6871,6 +10458,76 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
     if not all_scores:
         q.put({"type": "error", "message": "所有擷取影片都無法分析"})
         return
+
+    # ── Wave 5 S11: 來源等級品質加權 ──
+    # 用 source 的解析度、檔案大小（近似 bitrate）、時長合理性，
+    # 對 per-frame score 加乘數（0.85 ~ 1.15），讓品質好的來源整體勝出。
+    try:
+        src_weights = {}
+        for vpath, _sc in all_scores:
+            try:
+                _sw, _sh = _probe_video_size(vpath)
+                _fsize = os.path.getsize(vpath) if os.path.isfile(vpath) else 0
+                _dur = _sc[0].get("duration") if _sc else None
+                # 解析度分數：720p=1.0；1080p=1.08；1440p+=1.12；<720=0.92
+                _short = min(_sw or 0, _sh or 0)
+                if _short >= 1440:
+                    _rscore = 1.12
+                elif _short >= 1080:
+                    _rscore = 1.08
+                elif _short >= 720:
+                    _rscore = 1.0
+                elif _short >= 480:
+                    _rscore = 0.92
+                else:
+                    _rscore = 0.85
+                # bitrate proxy (MB/min)：6~20 最佳；< 2 粗糙，> 40 也扣（可能是再壓）
+                if _dur and _dur > 1 and _fsize > 0:
+                    _mbpm = (_fsize / 1024 / 1024) / (_dur / 60.0)
+                    if _mbpm < 2:
+                        _bscore = 0.90
+                    elif _mbpm < 6:
+                        _bscore = 0.97
+                    elif _mbpm <= 20:
+                        _bscore = 1.03
+                    elif _mbpm <= 40:
+                        _bscore = 1.0
+                    else:
+                        _bscore = 0.95
+                else:
+                    _bscore = 1.0
+                # 時長合理性：15~600s 最佳，極短/極長扣
+                if _dur:
+                    if 15 <= _dur <= 600:
+                        _dscore = 1.0
+                    elif _dur < 15:
+                        _dscore = 0.92
+                    elif _dur <= 1800:
+                        _dscore = 0.95
+                    else:
+                        _dscore = 0.90
+                else:
+                    _dscore = 1.0
+                _w = _rscore * _bscore * _dscore
+                _w = max(0.80, min(1.18, _w))
+                src_weights[vpath] = _w
+            except Exception:
+                src_weights[vpath] = 1.0
+        # 套用加權到 per-frame score
+        _weighted = 0
+        for vpath, _sc in all_scores:
+            _w = src_weights.get(vpath, 1.0)
+            if abs(_w - 1.0) < 0.01:
+                continue
+            for _s in _sc:
+                _s["score"] = float(_s.get("score", 0.0)) * _w
+            _weighted += 1
+        if _weighted > 0:
+            _avg_w = sum(src_weights.values()) / max(1, len(src_weights))
+            logging.info(f"S11 source-weight applied to {_weighted}/{len(all_scores)} "
+                         f"videos, avg_weight={_avg_w:.3f}")
+    except Exception as _s11e:
+        logging.warning(f"S11 source weighting skipped: {_s11e}")
 
     # 補償 xfade 轉場重疊損失的時間
     # 用 round() 而非 ceil()：target 45s / 6s clip / 0.5s fade 時
@@ -6899,12 +10556,23 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
         # 來源嚴重不足：放寬到 3 段才能填滿目標長度
         max_per_video = max(2, math.ceil(_needed_clips / max(_src_count, 1)))
     _want_vertical = resolution.endswith("_v")
+    # ── Wave 1/2 進階品質參數 ──
+    # 預設值設得寬鬆，避免把主選砍光；只有後段 fallback 才會關掉。
+    _A3_TARGET_RATIO = 0.30   # A3：目標人物在片段內出現比例 ≥ 30%（2Hz 密集抽樣）
+    _A4_SHAKE_MAX   = 9.0     # A4：光流平均 magnitude ≤ 9.0（太搖晃）
+    _A4_SHARP_MIN   = 60.0    # A4：Laplacian variance ≥ 60（太糊）
     # 嚴格限制每部影片片段數（主選 + 替補都用同一個上限）
     all_candidates = _select_highlight_clips(all_scores, clip_duration,
                                               adjusted_total * _extra_factor,
                                               max_per_video,
                                               person=sanitize_name(person),
-                                              prefer_vertical=_want_vertical)
+                                              prefer_vertical=_want_vertical,
+                                              bgm_path=bgm_path,
+                                              ref_embeddings=ref,
+                                              neg_embeddings=neg_ref,
+                                              target_ratio_min=_A3_TARGET_RATIO,
+                                              shake_max=_A4_SHAKE_MAX,
+                                              sharpness_min=_A4_SHARP_MIN)
     # 兩階段選擇：第一輪 max_per_video=1 結果不足時，放寬到 2 重跑補齊
     # 目的：source 多樣性優先；若 source 實際可用數 < needed，再允許同 source 多段
     _needed_for_target = needed_clips if (transition in ("crossfade", "fade") and transition_dur > 0
@@ -6916,7 +10584,13 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                                                   adjusted_total * _extra_factor,
                                                   2,
                                                   person=sanitize_name(person),
-                                                  prefer_vertical=_want_vertical)
+                                                  prefer_vertical=_want_vertical,
+                                                  bgm_path=bgm_path,
+                                                  ref_embeddings=ref,
+                                                  neg_embeddings=neg_ref,
+                                                  target_ratio_min=_A3_TARGET_RATIO,
+                                                  shake_max=_A4_SHAKE_MAX,
+                                                  sharpness_min=_A4_SHARP_MIN)
     if len(all_candidates) < _needed_for_target and max_per_video <= 2:
         logging.info(f"second pass got only {len(all_candidates)} candidates for {_needed_for_target} "
                      f"needed, retrying with max_per_video=3")
@@ -6924,7 +10598,44 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                                                   adjusted_total * _extra_factor,
                                                   3,
                                                   person=sanitize_name(person),
-                                                  prefer_vertical=_want_vertical)
+                                                  prefer_vertical=_want_vertical,
+                                                  bgm_path=bgm_path,
+                                                  ref_embeddings=ref,
+                                                  neg_embeddings=neg_ref,
+                                                  target_ratio_min=_A3_TARGET_RATIO,
+                                                  shake_max=_A4_SHAKE_MAX,
+                                                  sharpness_min=_A4_SHARP_MIN)
+    # 保險閥：嚴格 0.34 全軍覆沒時，放寬時間覆蓋率到 0.20 再試（身分比對仍嚴格）
+    # 並放寬 A3/A4 門檻，避免過濾太嚴
+    if not all_candidates:
+        logging.warning("strict face_presence_ratio 0.34 yielded 0 candidates — "
+                        "fallback to 0.20 (identity check still strict)")
+        all_candidates = _select_highlight_clips(all_scores, clip_duration,
+                                                  adjusted_total * _extra_factor,
+                                                  3,
+                                                  person=sanitize_name(person),
+                                                  prefer_vertical=_want_vertical,
+                                                  min_presence_ratio=0.20,
+                                                  bgm_path=bgm_path,
+                                                  ref_embeddings=ref,
+                                                  neg_embeddings=neg_ref,
+                                                  target_ratio_min=0.20,
+                                                  shake_max=15.0,
+                                                  sharpness_min=40.0)
+    # 第三層保險閥：放寬 + 關掉 multi-member 過濾
+    # 小團體（QWER 4 人、ITZY 5 人…）的 fancam 鏡頭常常帶到其他成員，
+    # multi-member 過濾太嚴會把所有候選砍光。最後一搏關掉這個檢查。
+    if not all_candidates:
+        logging.warning("fallback 0.20 also yielded 0 candidates — "
+                        "final fallback with multi-member filter disabled")
+        all_candidates = _select_highlight_clips(all_scores, clip_duration,
+                                                  adjusted_total * _extra_factor,
+                                                  3,
+                                                  person=sanitize_name(person),
+                                                  prefer_vertical=_want_vertical,
+                                                  min_presence_ratio=0.20,
+                                                  allow_multi_member=True,
+                                                  bgm_path=bgm_path)
     # 分成 selected 和 alternates（用 needed_clips 保持與上面計算一致）
     needed = needed_clips if (transition in ("crossfade", "fade") and transition_dur > 0
                               and clip_duration > transition_dur) else math.ceil(adjusted_total / clip_duration)
@@ -7043,6 +10754,13 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
                 audio_mode=audio_mode,
                 loudnorm_params=loudnorm_params,
                 name_tag=person,
+                cover_photo=_cover_photo_path,
+                cover_duration=_cover_dur,
+                bgm_path=bgm_path, bgm_volume=bgm_volume, bgm_start=bgm_start,
+                enhance=enhance, stabilize=stabilize,
+                interpolate_60fps=interpolate_60fps,
+                upscale_target=upscale_target,
+                two_pass_loudnorm=two_pass_loudnorm,
             )
         except Exception as _ce:
             logging.warning(f"compile attempt {_compile_attempts+1} failed: {_ce}")
@@ -7091,6 +10809,8 @@ def _auto_video_pipeline(q, person, search_keyword, max_videos,
             "caption_text": _cap["text"],
             "hashtags": _cap["hashtags"],
             "caption_sources": _cap.get("sources", 0),
+            # 給前端重建 `?dl=Person #Person #group #한글.mp4` 用
+            "person": person,
             "cover_url": f"/yt-files/{cover_rel}" if cover_rel else None,
         }
         q.put(done_data)
@@ -7130,7 +10850,7 @@ def api_auto_video_progress(task_id):
             try:
                 evt = q.get(timeout=60)
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
-                if evt.get("type") in ("done", "error"):
+                if evt.get("type") in ("done", "error", "cancelled"):
                     break
                 # clips_ready 不結束 SSE，worker 還在等確認
             except Empty:
@@ -7161,6 +10881,83 @@ def api_auto_video_confirm(task_id):
     confirm_data[0] = indices
     confirm_event.set()
     return jsonify({"ok": True})
+
+
+def _av_cancel_one(tid):
+    """中止單一任務：設 cancel_event、推 cancelled 訊息、觸發 confirm_event（讓 worker 從 wait 中醒來）、更新 history。回傳是否成功找到任務。"""
+    with auto_video_tasks_lock:
+        task = auto_video_tasks.get(tid)
+    if not task:
+        return False, "任務不存在或已結束"
+    try:
+        ce = task.get("cancel_event")
+        if ce:
+            ce.set()
+        q = task.get("queue")
+        label = task.get("label", "")
+        if q:
+            q.put({"type": "cancelled", "message": "⏹ 使用者中止", "label": label})
+            q.put({"type": "error", "message": "已中止"})  # 讓 SSE 主迴圈收尾
+        # 如果在 preview 模式卡在 confirm_event.wait()，推個空選擇讓 worker 繼續走
+        cfe = task.get("confirm_event")
+        cfd = task.get("confirm_data")
+        if cfe and cfd is not None and not cfe.is_set():
+            cfd[0] = []  # 空選 → pipeline 視為取消
+            cfe.set()
+    except Exception as e:
+        logging.warning(f"cancel task {tid}: {e}")
+    _av_save_history(tid, "cancelled", task.get("label", ""), {"message": "使用者中止"})
+    return True, None
+
+
+@app.route("/api/auto-video/stop/<task_id>", methods=["POST"])
+def api_auto_video_stop(task_id):
+    """中止單一一鍵影片任務。"""
+    ok, err = _av_cancel_one(task_id)
+    if not ok:
+        return jsonify({"error": err}), 404
+    return jsonify({"ok": True, "task_id": task_id})
+
+
+@app.route("/api/auto-video/stop-all", methods=["POST"])
+def api_auto_video_stop_all():
+    """一鍵中止所有進行中的一鍵影片任務。"""
+    with auto_video_tasks_lock:
+        tids = list(auto_video_tasks.keys())
+    stopped = []
+    for tid in tids:
+        ok, _ = _av_cancel_one(tid)
+        if ok:
+            stopped.append(tid)
+    return jsonify({"ok": True, "stopped": stopped, "count": len(stopped)})
+
+
+@app.route("/api/auto-video/dismiss/<task_id>", methods=["POST", "DELETE"])
+def api_auto_video_dismiss(task_id):
+    """把任務從歷史清掉 — 讓前端叉叉按了之後重新整理也不會再出現。
+    僅清 in-memory + disk history；已完成的輸出檔不動。
+    若任務仍在跑，不處理（請先用 /stop）。"""
+    with auto_video_tasks_lock:
+        still_active = task_id in auto_video_tasks
+    if still_active:
+        return jsonify({"error": "任務仍在跑，請先中止"}), 409
+    with _AV_HISTORY_LOCK:
+        existed = auto_video_history.pop(task_id, None) is not None
+        _av_persist_history_nolock()
+    return jsonify({"ok": True, "removed": existed, "task_id": task_id})
+
+
+@app.route("/api/auto-video/dismiss-all", methods=["POST", "DELETE"])
+def api_auto_video_dismiss_all():
+    """把所有「非 running」的歷史一次清光。"""
+    with auto_video_tasks_lock:
+        active_ids = set(auto_video_tasks.keys())
+    with _AV_HISTORY_LOCK:
+        dropped = [tid for tid in list(auto_video_history.keys()) if tid not in active_ids]
+        for tid in dropped:
+            auto_video_history.pop(tid, None)
+        _av_persist_history_nolock()
+    return jsonify({"ok": True, "removed": len(dropped)})
 
 
 @app.route("/api/auto-video/blacklist", methods=["POST"])
@@ -7763,12 +11560,48 @@ justify-content:center;align-items:center;cursor:zoom-out}
   </div>
   <div>
     <label style="font-size:.8em;color:var(--txt2)">音訊</label>
-    <select id="hl-audio-mode">
+    <select id="hl-audio-mode" onchange="hlAudioModeChange()">
       <option value="original" selected>保留原音</option>
       <option value="mute">靜音</option>
+      <option value="bgm">純 BGM</option>
+      <option value="bgm+source">BGM + 原音（ducking）</option>
     </select>
   </div>
 </div>
+<div id="hl-bgm-wrap" style="margin-top:8px;display:none;padding:8px;background:var(--bg2);border-radius:6px">
+  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <label style="font-size:.8em;color:var(--txt2);min-width:48px">BGM</label>
+    <select id="hl-bgm-select" style="flex:1;min-width:160px;font-size:.85em"></select>
+    <button class="btn" style="font-size:.78em;padding:4px 8px" onclick="bgmRefresh('hl')">🔄</button>
+    <input type="file" id="hl-bgm-upload" accept=".wav,.mp3,.flac,.m4a,.aac,.ogg" style="display:none" onchange="bgmUploadFile(this,'hl')">
+    <button class="btn" style="font-size:.78em;padding:4px 8px" onclick="document.getElementById('hl-bgm-upload').click()">📤 上傳</button>
+  </div>
+  <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+    <label style="font-size:.78em;color:var(--txt2)">音量</label>
+    <input type="range" id="hl-bgm-vol" min="0" max="2" step="0.05" value="1.0" style="flex:1;min-width:80px">
+    <span id="hl-bgm-vol-lbl" style="font-size:.78em;color:var(--txt2);min-width:34px">1.00</span>
+    <label style="font-size:.78em;color:var(--txt2);margin-left:4px">起始(s)</label>
+    <input type="number" id="hl-bgm-start" min="0" step="0.5" value="0" style="width:60px;font-size:.82em">
+  </div>
+</div>
+<details style="margin-top:8px">
+  <summary style="font-size:.82em;cursor:pointer;color:var(--txt2)">⚙️ 進階畫質設定（Wave 4/5/6）</summary>
+  <div style="padding:8px;background:var(--bg2);border-radius:6px;margin-top:4px;display:flex;flex-direction:column;gap:4px;font-size:.82em">
+    <label><input type="checkbox" id="hl-opt-ln" checked> 🎚️ 成品 Two-pass Loudnorm (-14 LUFS)</label>
+    <label><input type="checkbox" id="hl-opt-enhance"> ✨ 輕降噪 + 銳化（hqdn3d + unsharp）</label>
+    <label><input type="checkbox" id="hl-opt-stab"> 🎯 手震偵測穩定化（vidstab 2-pass，僅對中度晃動生效）</label>
+    <label><input type="checkbox" id="hl-opt-60fps"> 🎞️ 60fps 插幀（minterpolate；耗時 ×2）</label>
+    <div style="display:flex;align-items:center;gap:6px">
+      <label style="color:var(--txt2)">升頻</label>
+      <select id="hl-opt-upscale" style="font-size:.82em">
+        <option value="">關閉</option>
+        <option value="auto">自動（短邊 &lt; 720p 才升）</option>
+        <option value="720p">升至 720p</option>
+        <option value="1080p">升至 1080p</option>
+      </select>
+    </div>
+  </div>
+</details>
 <div id="hl-video-list" style="margin-top:10px;display:none">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
     <span style="font-size:.82em;font-weight:600;color:var(--txt2)">選擇影片來源</span>
@@ -7821,6 +11654,31 @@ justify-content:center;align-items:center;cursor:zoom-out}
   <label>額外關鍵字</label>
   <input type="text" id="av-keyword" placeholder="(選填) 額外關鍵字，例如：ice cream、drip、forever">
 </div>
+<div class="row" id="av-cover-row" style="align-items:center;gap:8px;flex-wrap:wrap">
+  <label>封面圖</label>
+  <span id="av-cover-status" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(100,200,100,0.12);border:1px dashed rgba(100,200,100,0.4);border-radius:6px;font-size:.82em">
+    <span id="av-cover-status-icon">🎲</span>
+    <span id="av-cover-status-text">自動挑（隨機一張）</span>
+    <img id="av-cover-thumb" style="display:none;width:32px;height:32px;object-fit:cover;border-radius:4px;margin-left:4px">
+  </span>
+  <button type="button" class="btn btn-sec" onclick="_avOpenCoverPicker()"
+          style="font-size:.8em;padding:4px 10px">🖼️ 改自己挑</button>
+  <button type="button" id="av-cover-reset" onclick="_avClearCover()"
+          style="display:none;background:none;border:1px solid var(--border);border-radius:6px;padding:3px 10px;font-size:.78em;cursor:pointer" title="恢復成自動挑">↩️ 回自動</button>
+  <label style="font-size:.78em;color:var(--txt2);margin-left:8px">封面秒數</label>
+  <select id="av-cover-dur" style="font-size:.8em;padding:3px 6px" title="封面秒數；選「僅縮圖」= 只存在 1 幀，平台用來當縮圖但觀眾幾乎看不見">
+    <option value="0" selected>僅縮圖（1 幀 ≈ 33ms）</option>
+    <option value="0.3">0.3 秒</option>
+    <option value="0.5">0.5 秒</option>
+    <option value="1.0">1.0 秒</option>
+    <option value="1.5">1.5 秒</option>
+    <option value="2.0">2.0 秒</option>
+  </select>
+  <span id="av-cover-hint" style="flex-basis:100%;font-size:.72em;color:var(--txt2);margin-top:4px">
+    💡 預設從資料庫隨機挑一張當封面（每次生成不一樣）。「僅縮圖」= 影片不會顯示這張圖，但 TikTok/YT 會拿來當縮圖
+  </span>
+  <input type="hidden" id="av-cover-filename" value="__auto__">
+</div>
 <div class="row" style="background:rgba(100,150,255,0.08);padding:8px 10px;border-radius:6px;margin-bottom:8px;align-items:center;gap:12px;flex-wrap:wrap">
   <label style="font-size:.88em;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;margin:0">
     <input type="checkbox" id="av-auto-mode" onchange="avAutoModeChanged()">
@@ -7847,21 +11705,29 @@ justify-content:center;align-items:center;cursor:zoom-out}
     </select>
   </div>
   <div id="av-platform-wrap">
-    <label style="font-size:.8em;color:var(--txt2)">平台</label>
-    <select id="av-platform">
-      <option value="all">全部（跨平台合併）</option>
-      <option value="tiktok" selected>TikTok</option>
-      <option value="youtube">YouTube</option>
-      <option value="yt_shorts">YouTube Shorts</option>
-      <option value="ig_reels">Instagram Reels</option>
-    </select>
+    <label style="font-size:.8em;color:var(--txt2)">平台（可複選）</label>
+    <div id="av-platform-chips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+      <label class="av-plat-chip" style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border:1px solid var(--brd);border-radius:14px;font-size:.82em;cursor:pointer;user-select:none;background:var(--bg2)">
+        <input type="checkbox" class="av-plat" value="tiktok" style="margin:0"> TikTok
+      </label>
+      <label class="av-plat-chip" style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border:1px solid var(--brd);border-radius:14px;font-size:.82em;cursor:pointer;user-select:none;background:var(--bg2)">
+        <input type="checkbox" class="av-plat" value="youtube" checked style="margin:0"> YouTube
+      </label>
+      <label class="av-plat-chip" style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border:1px solid var(--brd);border-radius:14px;font-size:.82em;cursor:pointer;user-select:none;background:var(--bg2)">
+        <input type="checkbox" class="av-plat" value="yt_shorts" checked style="margin:0"> YT Shorts
+      </label>
+      <label class="av-plat-chip" style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border:1px solid var(--brd);border-radius:14px;font-size:.82em;cursor:pointer;user-select:none;background:var(--bg2)">
+        <input type="checkbox" class="av-plat" value="ig_reels" style="margin:0"> IG Reels
+      </label>
+      <button type="button" class="btn" onclick="_avPlatToggleAll()" style="font-size:.75em;padding:2px 8px;margin-left:4px" title="一鍵全選 / 全不選">全部</button>
+    </div>
   </div>
   <div>
     <label style="font-size:.8em;color:var(--txt2)">影片類型</label>
     <select id="av-video-type">
-      <option value="all" selected>全部</option>
+      <option value="all">全部</option>
       <option value="dance">舞蹈</option>
-      <option value="fancam">直拍</option>
+      <option value="fancam" selected>直拍</option>
       <option value="stage">舞台</option>
       <option value="cute">可愛</option>
       <option value="vlog">Vlog</option>
@@ -7873,8 +11739,8 @@ justify-content:center;align-items:center;cursor:zoom-out}
     <label style="font-size:.8em;color:var(--txt2)">下載數量</label>
     <select id="av-max-videos">
       <option value="5">5 部</option>
-      <option value="10" selected>10 部</option>
-      <option value="20">20 部</option>
+      <option value="10">10 部</option>
+      <option value="20" selected>20 部</option>
       <option value="30">30 部</option>
       <option value="50">50 部</option>
       <option value="100">100 部</option>
@@ -7893,10 +11759,10 @@ justify-content:center;align-items:center;cursor:zoom-out}
     <label style="font-size:.8em;color:var(--txt2)">每段秒數</label>
     <select id="av-clip-dur">
       <option value="2">2 秒</option>
-      <option value="3" selected>3 秒</option>
+      <option value="3">3 秒</option>
       <option value="4">4 秒</option>
       <option value="5">5 秒</option>
-      <option value="6">6 秒</option>
+      <option value="6" selected>6 秒</option>
       <option value="8">8 秒</option>
       <option value="10">10 秒</option>
       <option value="15">15 秒</option>
@@ -7906,8 +11772,8 @@ justify-content:center;align-items:center;cursor:zoom-out}
     <label style="font-size:.8em;color:var(--txt2)">總長度</label>
     <select id="av-total-dur">
       <option value="15">15 秒</option>
-      <option value="30" selected>30 秒</option>
-      <option value="45">45 秒</option>
+      <option value="30">30 秒</option>
+      <option value="45" selected>45 秒</option>
       <option value="60">1 分鐘</option>
       <option value="90">1.5 分鐘</option>
       <option value="120">2 分鐘</option>
@@ -7938,17 +11804,69 @@ justify-content:center;align-items:center;cursor:zoom-out}
   </div>
   <div>
     <label style="font-size:.8em;color:var(--txt2)">音訊</label>
-    <select id="av-audio">
-      <option value="original" selected>保留原音</option>
-      <option value="mute">靜音</option>
+    <select id="av-audio" onchange="avAudioModeChange()">
+      <option value="original">保留原音</option>
+      <option value="mute" selected>靜音</option>
+      <option value="bgm">純 BGM</option>
+      <option value="bgm+source">BGM + 原音（ducking）</option>
     </select>
   </div>
 </div>
-<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
+<div id="av-bgm-wrap" style="margin-top:8px;display:none;padding:8px;background:var(--bg2);border-radius:6px">
+  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <label style="font-size:.8em;color:var(--txt2);min-width:48px">BGM</label>
+    <select id="av-bgm-select" style="flex:1;min-width:160px;font-size:.85em"></select>
+    <button class="btn" style="font-size:.78em;padding:4px 8px" onclick="bgmRefresh('av')">🔄</button>
+    <input type="file" id="av-bgm-upload" accept=".wav,.mp3,.flac,.m4a,.aac,.ogg" style="display:none" onchange="bgmUploadFile(this,'av')">
+    <button class="btn" style="font-size:.78em;padding:4px 8px" onclick="document.getElementById('av-bgm-upload').click()">📤 上傳</button>
+  </div>
+  <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+    <label style="font-size:.78em;color:var(--txt2)">音量</label>
+    <input type="range" id="av-bgm-vol" min="0" max="2" step="0.05" value="1.0" style="flex:1;min-width:80px">
+    <span id="av-bgm-vol-lbl" style="font-size:.78em;color:var(--txt2);min-width:34px">1.00</span>
+    <label style="font-size:.78em;color:var(--txt2);margin-left:4px">起始(s)</label>
+    <input type="number" id="av-bgm-start" min="0" step="0.5" value="0" style="width:60px;font-size:.82em">
+  </div>
+</div>
+<details style="margin-top:8px">
+  <summary style="font-size:.82em;cursor:pointer;color:var(--txt2)">⚙️ 進階畫質設定（Wave 4/5/6）</summary>
+  <div style="padding:8px;background:var(--bg2);border-radius:6px;margin-top:4px;display:flex;flex-direction:column;gap:4px;font-size:.82em">
+    <label><input type="checkbox" id="av-opt-ln"> 🎚️ 成品 Two-pass Loudnorm (-14 LUFS)</label>
+    <label><input type="checkbox" id="av-opt-enhance" checked> ✨ 輕降噪 + 銳化（hqdn3d + unsharp）</label>
+    <label><input type="checkbox" id="av-opt-stab"> 🎯 手震偵測穩定化（vidstab 2-pass，僅對中度晃動生效）</label>
+    <label><input type="checkbox" id="av-opt-60fps"> 🎞️ 60fps 插幀（minterpolate；耗時 ×2）</label>
+    <div style="display:flex;align-items:center;gap:6px">
+      <label style="color:var(--txt2)">升頻</label>
+      <select id="av-opt-upscale" style="font-size:.82em">
+        <option value="">關閉</option>
+        <option value="auto" selected>自動（短邊 &lt; 720p 才升）</option>
+        <option value="720p">升至 720p</option>
+        <option value="1080p">升至 1080p</option>
+      </select>
+    </div>
+  </div>
+</details>
+<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
   <button class="btn btn-pri" id="btn-auto-video" onclick="autoVideoStart(false)"
           style="font-size:1em;padding:10px 32px">🚀 一鍵生成影片</button>
   <button class="btn btn-sec" onclick="autoVideoStart(true)"
           style="font-size:1em;padding:10px 24px">🎞️ 先挑選再合成</button>
+  <button class="btn" id="btn-av-stop-all" onclick="_avStopAll()"
+          style="font-size:1em;padding:10px 24px;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5"
+          title="中止所有進行中的一鍵影片任務">⏹ 一鍵中止</button>
+  <button class="btn" id="btn-av-download-all" onclick="_avDownloadAllAndClear()"
+          style="font-size:1em;padding:10px 24px;background:#dcfce7;color:#166534;border:1px solid #86efac;display:none"
+          title="下載當前批次全部完成的影片，下載完後自動清除卡片">⬇ 一鍵下載全部</button>
+  <button class="btn" onclick="openPhotosHealth()"
+          style="font-size:1em;padding:10px 20px;background:#e0e7ff;color:#3730a3;border:1px solid #a5b4fc"
+          title="檢視每位成員的照片數、face embedding 狀態、可能混到的照片">🏥 照片健檢</button>
+  <div id="av-multi-mode-wrap" style="margin-left:auto;display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(100,150,255,0.08);border-radius:8px">
+    <label for="av-multi-mode" style="font-size:.82em;color:var(--txt2);margin:0" title="選「全團員」或多人時才生效">多人模式</label>
+    <select id="av-multi-mode" style="font-size:.85em;padding:4px 8px">
+      <option value="parallel" selected>⚡ 並行（同時跑）</option>
+      <option value="sequential">⏩ 依序（一個接一個）</option>
+    </select>
+  </div>
 </div>
 </div>
 
@@ -7961,6 +11879,50 @@ justify-content:center;align-items:center;cursor:zoom-out}
 <div class="modal-box">
 <div class="modal-head"><h3 id="gallery-title">圖庫</h3><span id="gallery-count" style="font-size:.82em;color:var(--txt2);margin-left:8px"></span><button class="modal-close" onclick="closeModal('gallery-modal')">&times;</button></div>
 <div class="modal-body"><div class="gallery" id="gallery-grid"></div></div>
+</div>
+</div>
+
+<!-- 照片健檢彈窗 -->
+<div class="modal" id="photos-health-modal">
+<div class="modal-box" style="max-width:1000px">
+<div class="modal-head">
+  <h3>🏥 照片健檢 Dashboard</h3>
+  <span id="ph-summary" style="font-size:.82em;color:var(--txt2);margin-left:8px"></span>
+  <button class="modal-close" onclick="closeModal('photos-health-modal')">&times;</button>
+</div>
+<div class="modal-body">
+  <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+    <label style="font-size:.85em;color:var(--txt2)">篩選狀態:</label>
+    <select id="ph-status-filter" onchange="renderPhotosHealth()" style="font-size:.88em">
+      <option value="all">全部</option>
+      <option value="problem">⚠️ 只看有問題的</option>
+      <option value="ok">✅ 只看正常</option>
+    </select>
+    <label style="font-size:.85em;color:var(--txt2);margin-left:12px">搜尋:</label>
+    <input type="text" id="ph-search" oninput="renderPhotosHealth()" placeholder="成員名或團名" style="font-size:.85em;padding:4px 10px">
+    <span style="flex:1"></span>
+    <button class="btn" onclick="loadPhotosHealth(true)" style="font-size:.82em;padding:4px 12px">🔄 重新載入</button>
+  </div>
+  <div id="ph-table-wrap" style="max-height:70vh;overflow-y:auto">
+    <div style="text-align:center;padding:40px;color:var(--txt2)">載入中…</div>
+  </div>
+</div>
+</div>
+</div>
+
+<!-- 聚類 audit 彈窗（HDBSCAN 混人偵測） -->
+<div class="modal" id="cluster-audit-modal">
+<div class="modal-box" style="max-width:760px">
+<div class="modal-head">
+  <h3>🔬 資料夾聚類 Audit</h3>
+  <span id="ca-subtitle" style="font-size:.8em;color:var(--txt2);margin-left:8px"></span>
+  <button class="modal-close" onclick="closeModal('cluster-audit-modal')">&times;</button>
+</div>
+<div class="modal-body">
+  <div id="ca-body">
+    <div style="text-align:center;padding:40px;color:var(--txt2)">載入中…</div>
+  </div>
+</div>
 </div>
 </div>
 
@@ -8030,9 +11992,11 @@ justify-content:center;align-items:center;cursor:zoom-out}
     </div>
     <div>
       <label style="font-size:.8em;color:var(--txt2)">音訊</label>
-      <select id="cb-audio" style="font-size:.88em">
+      <select id="cb-audio" style="font-size:.88em" onchange="cbAudioModeChange()">
         <option value="original" selected>保留原音</option>
         <option value="mute">靜音</option>
+        <option value="bgm">純 BGM</option>
+        <option value="bgm+source">BGM + 原音（ducking）</option>
       </select>
     </div>
     <span style="flex:1"></span>
@@ -8040,11 +12004,123 @@ justify-content:center;align-items:center;cursor:zoom-out}
       🎬 合成選取的片段
     </button>
   </div>
+  <div id="cb-bgm-wrap" style="margin-top:8px;display:none;padding:8px;background:var(--bg2);border-radius:6px">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <label style="font-size:.8em;color:var(--txt2);min-width:48px">BGM</label>
+      <select id="cb-bgm-select" style="flex:1;min-width:160px;font-size:.85em"></select>
+      <button class="btn" style="font-size:.78em;padding:4px 8px" onclick="bgmRefresh('cb')">🔄</button>
+      <input type="file" id="cb-bgm-upload" accept=".wav,.mp3,.flac,.m4a,.aac,.ogg" style="display:none" onchange="bgmUploadFile(this,'cb')">
+      <button class="btn" style="font-size:.78em;padding:4px 8px" onclick="document.getElementById('cb-bgm-upload').click()">📤 上傳</button>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+      <label style="font-size:.78em;color:var(--txt2)">音量</label>
+      <input type="range" id="cb-bgm-vol" min="0" max="2" step="0.05" value="1.0" style="flex:1;min-width:80px">
+      <span id="cb-bgm-vol-lbl" style="font-size:.78em;color:var(--txt2);min-width:34px">1.00</span>
+      <label style="font-size:.78em;color:var(--txt2);margin-left:4px">起始(s)</label>
+      <input type="number" id="cb-bgm-start" min="0" step="0.5" value="0" style="width:60px;font-size:.82em">
+    </div>
+  </div>
+  <details style="margin-top:8px">
+    <summary style="font-size:.82em;cursor:pointer;color:var(--txt2)">⚙️ 進階畫質設定（Wave 4/5/6）</summary>
+    <div style="padding:8px;background:var(--bg2);border-radius:6px;margin-top:4px;display:flex;flex-direction:column;gap:4px;font-size:.82em">
+      <label><input type="checkbox" id="cb-opt-ln" checked> 🎚️ 成品 Two-pass Loudnorm (-14 LUFS)</label>
+      <label><input type="checkbox" id="cb-opt-enhance"> ✨ 輕降噪 + 銳化（hqdn3d + unsharp）</label>
+      <label><input type="checkbox" id="cb-opt-stab"> 🎯 手震偵測穩定化（vidstab 2-pass，僅對中度晃動生效）</label>
+      <label><input type="checkbox" id="cb-opt-60fps"> 🎞️ 60fps 插幀（minterpolate;耗時 ×2）</label>
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="color:var(--txt2)">升頻</label>
+        <select id="cb-opt-upscale" style="font-size:.82em">
+          <option value="">關閉</option>
+          <option value="auto">自動（短邊 &lt; 720p 才升）</option>
+          <option value="720p">升至 720p</option>
+          <option value="1080p">升至 1080p</option>
+        </select>
+      </div>
+    </div>
+  </details>
 </div>
 </div>
 </div>
 
 <script>
+// ── BGM 共用工具 ──────────────────────────────────────
+// prefix: 'hl' / 'av' / 'cb' — 對應 highlight / auto-video / clip-browser 三張卡
+window._bgmFiles = [];
+async function bgmRefresh(prefix){
+  try{
+    const r = await fetch('/api/bgm/list');
+    const d = await r.json();
+    window._bgmFiles = d.files || [];
+    ['hl','av','cb'].forEach(p=>{
+      const sel = document.getElementById(p+'-bgm-select');
+      if(!sel) return;
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">（未選擇）</option>' + window._bgmFiles.map(f=>
+        '<option value="'+encodeURIComponent(f.name)+'">'+f.name+' ('+(f.size_kb||0)+' KB)</option>'
+      ).join('');
+      if(cur) sel.value = cur;
+    });
+  }catch(e){ console.warn('bgm list fail', e); }
+}
+async function bgmUploadFile(input, prefix){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  const fd = new FormData();
+  fd.append('file', f);
+  try{
+    const r = await fetch('/api/bgm/upload',{method:'POST',body:fd});
+    const d = await r.json();
+    if(d.error){ alert('BGM 上傳失敗：'+d.error); return; }
+    await bgmRefresh(prefix);
+    const sel = document.getElementById(prefix+'-bgm-select');
+    if(sel && d.name) sel.value = encodeURIComponent(d.name);
+  }catch(e){ alert('BGM 上傳失敗：'+e); }
+  input.value = '';
+}
+function bgmInjectOpts(prefix, opts){
+  const sel = document.getElementById(prefix+'-bgm-select');
+  if(!sel) return;
+  const v = sel.value;
+  if(!v) return;
+  opts.bgm_path = decodeURIComponent(v);
+  const vol = document.getElementById(prefix+'-bgm-vol');
+  const st = document.getElementById(prefix+'-bgm-start');
+  if(vol) opts.bgm_volume = parseFloat(vol.value) || 1.0;
+  if(st) opts.bgm_start = parseFloat(st.value) || 0;
+}
+// Wave 4/5/6 進階設定 — 把勾選狀態塞進 POST body
+function _injectAdvOpts(prefix, opts){
+  const _ln = document.getElementById(prefix+'-opt-ln');
+  const _en = document.getElementById(prefix+'-opt-enhance');
+  const _st = document.getElementById(prefix+'-opt-stab');
+  const _fp = document.getElementById(prefix+'-opt-60fps');
+  const _up = document.getElementById(prefix+'-opt-upscale');
+  if(_ln) opts.two_pass_loudnorm = !!_ln.checked;
+  if(_en) opts.enhance = !!_en.checked;
+  if(_st) opts.stabilize = !!_st.checked;
+  if(_fp) opts.interpolate_60fps = !!_fp.checked;
+  if(_up) opts.upscale_target = (_up.value || '').trim();
+}
+function _bgmToggleWrap(prefix){
+  const sel = document.getElementById(prefix+'-audio-mode') || document.getElementById(prefix+'-audio');
+  const wrap = document.getElementById(prefix+'-bgm-wrap');
+  if(!sel || !wrap) return;
+  const needBgm = (sel.value === 'bgm' || sel.value === 'bgm+source');
+  wrap.style.display = needBgm ? '' : 'none';
+  if(needBgm && (!window._bgmFiles || !window._bgmFiles.length)) bgmRefresh(prefix);
+}
+function hlAudioModeChange(){ _bgmToggleWrap('hl'); }
+function avAudioModeChange(){ _bgmToggleWrap('av'); }
+function cbAudioModeChange(){ _bgmToggleWrap('cb'); }
+// 音量拖動即時更新 label
+document.addEventListener('DOMContentLoaded', ()=>{
+  ['hl','av','cb'].forEach(p=>{
+    const v = document.getElementById(p+'-bgm-vol');
+    const l = document.getElementById(p+'-bgm-vol-lbl');
+    if(v && l){ v.addEventListener('input', ()=>{ l.textContent = parseFloat(v.value).toFixed(2); }); }
+  });
+});
+
 // ── Tab 切換 ──────────────────────────────────────────
 function switchTab(tab){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
@@ -8302,6 +12378,204 @@ async function deletePhotoFolder(name, btn){
 function showBatch() { document.getElementById('batch-modal').classList.add('show'); }
 function closeModal(id) { document.getElementById(id).classList.remove('show'); }
 
+// ── 照片健檢 Dashboard ──
+let _phData = null;
+async function loadPhotosHealth(force){
+  const wrap = document.getElementById('ph-table-wrap');
+  if(!_phData || force){
+    wrap.innerHTML = '<div style="text-align:center;padding:40px;color:var(--txt2)">載入中…</div>';
+    try{
+      const r = await fetch('/api/photos-health');
+      _phData = await r.json();
+    }catch(e){
+      wrap.innerHTML = '<div style="padding:20px;color:#b91c1c">載入失敗: '+e+'</div>';
+      return;
+    }
+  }
+  renderPhotosHealth();
+}
+function openPhotosHealth(){
+  document.getElementById('photos-health-modal').classList.add('show');
+  loadPhotosHealth(true);
+}
+function _phFmtAge(ts){
+  if(!ts) return '-';
+  const s = Math.floor(Date.now()/1000 - ts);
+  if(s < 60) return s+'s';
+  if(s < 3600) return Math.floor(s/60)+'m';
+  if(s < 86400) return Math.floor(s/3600)+'h';
+  return Math.floor(s/86400)+'d';
+}
+function _phStatusBadge(st){
+  const MAP = {
+    'ok':          ['✅ OK',      '#dcfce7', '#166534'],
+    'low_photos':  ['⚠️ 照片少',  '#fef3c7', '#92400e'],
+    'no_cache':    ['🔄 未建 cache','#e0e7ff','#3730a3'],
+    'low_faces':   ['⚠️ 臉部少',  '#fef3c7', '#92400e'],
+    'high_reject': ['⚠️ 污染高',  '#fee2e2', '#b91c1c'],
+  };
+  const [label, bg, fg] = MAP[st] || ['?', '#e5e7eb', '#374151'];
+  return '<span style="padding:2px 8px;border-radius:10px;font-size:.78em;background:'+bg+';color:'+fg+';white-space:nowrap">'+label+'</span>';
+}
+function renderPhotosHealth(){
+  if(!_phData) return;
+  const flt = document.getElementById('ph-status-filter').value;
+  const q = (document.getElementById('ph-search').value || '').toLowerCase().trim();
+  let members = _phData.members || [];
+  if(flt === 'problem') members = members.filter(m => m.status !== 'ok');
+  else if(flt === 'ok') members = members.filter(m => m.status === 'ok');
+  if(q) members = members.filter(m =>
+    (m.folder||'').toLowerCase().includes(q) ||
+    (m.display||'').toLowerCase().includes(q) ||
+    (m.group||'').toLowerCase().includes(q)
+  );
+
+  // group by group name
+  const byGroup = {};
+  for(const m of members){
+    const g = m.group || '(無團)';
+    if(!byGroup[g]) byGroup[g] = [];
+    byGroup[g].push(m);
+  }
+
+  // summary
+  const total = (_phData.members||[]).length;
+  const problems = (_phData.members||[]).filter(m => m.status !== 'ok').length;
+  document.getElementById('ph-summary').textContent =
+    `共 ${total} 位成員，顯示 ${members.length}，問題 ${problems}`;
+
+  let html = '';
+  for(const g of Object.keys(byGroup).sort()){
+    const ms = byGroup[g];
+    html += '<div style="margin-bottom:14px">';
+    html += '<div style="font-weight:600;padding:6px 10px;background:rgba(100,150,255,0.08);border-radius:6px;margin-bottom:6px">'
+            + (g === '(無團)' ? g : '🎵 '+g)
+            + ' <span style="font-size:.82em;color:var(--txt2);font-weight:normal">('+ms.length+')</span></div>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:.85em">';
+    html += '<thead><tr style="border-bottom:1px solid #e5e7eb">'
+         +  '<th style="text-align:left;padding:6px 8px;width:26%">folder / display</th>'
+         +  '<th style="text-align:right;padding:6px 8px">photos</th>'
+         +  '<th style="text-align:right;padding:6px 8px">face kept</th>'
+         +  '<th style="text-align:right;padding:6px 8px">rejected</th>'
+         +  '<th style="text-align:right;padding:6px 8px">cache age</th>'
+         +  '<th style="text-align:center;padding:6px 8px">status</th>'
+         +  '<th style="text-align:center;padding:6px 8px">audit</th>'
+         +  '</tr></thead><tbody>';
+    for(const m of ms){
+      const rejPct = (m.face_raw_rows && m.face_rejected_rows)
+        ? ' (' + Math.round(m.face_rejected_rows/m.face_raw_rows*100) + '%)'
+        : '';
+      // 顯示 audit 按鈕：有 cache 的 row 都可以 audit（高 reject 的會特別標紅）
+      const hiRej = (m.face_raw_rows && m.face_rejected_rows
+                      && m.face_rejected_rows/m.face_raw_rows > 0.2);
+      const auditBtn = m.face_cache_exists
+        ? '<button class="btn" style="font-size:.72em;padding:2px 8px;'
+          + (hiRej ? 'background:#fee2e2;color:#b91c1c;border-color:#fca5a5' : '')
+          + '" onclick="openClusterAudit(\''+encodeURIComponent(m.folder)+'\')">🔬</button>'
+        : '<span style="font-size:.72em;color:var(--txt2)">-</span>';
+      html += '<tr style="border-bottom:1px solid #f3f4f6">'
+           +  '<td style="padding:6px 8px"><code style="font-size:.85em">'+m.folder+'</code>'
+           +     (m.display && m.display !== m.folder ? '<span style="color:var(--txt2);margin-left:6px">→ '+m.display+'</span>' : '')
+           +  '</td>'
+           +  '<td style="text-align:right;padding:6px 8px">'+m.photo_count+'</td>'
+           +  '<td style="text-align:right;padding:6px 8px">'+(m.face_kept_rows??'-')+'</td>'
+           +  '<td style="text-align:right;padding:6px 8px">'+(m.face_rejected_rows??'-')+rejPct+'</td>'
+           +  '<td style="text-align:right;padding:6px 8px">'+_phFmtAge(m.face_cache_built_at)+'</td>'
+           +  '<td style="text-align:center;padding:6px 8px">'+_phStatusBadge(m.status)+'</td>'
+           +  '<td style="text-align:center;padding:6px 8px">'+auditBtn+'</td>'
+           +  '</tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  if(!members.length) html = '<div style="text-align:center;padding:40px;color:var(--txt2)">沒有符合的資料</div>';
+  document.getElementById('ph-table-wrap').innerHTML = html;
+}
+
+// ── HDBSCAN 資料夾聚類 Audit（Tier 1 #2）──
+async function openClusterAudit(folderEnc){
+  const folder = decodeURIComponent(folderEnc);
+  document.getElementById('cluster-audit-modal').classList.add('show');
+  document.getElementById('ca-subtitle').textContent = folder;
+  const body = document.getElementById('ca-body');
+  body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--txt2)">聚類中（HDBSCAN on cosine distances）…</div>';
+  try{
+    const r = await fetch('/api/photos-cluster-audit/' + encodeURIComponent(folder));
+    const d = await r.json();
+    if(!d.ok){
+      body.innerHTML = '<div style="padding:20px;color:#b91c1c">❌ '+(d.reason||'unknown error')+'</div>';
+      return;
+    }
+    let html = '';
+    // Verdict badge 樣式
+    const VERDICT_STYLE = {
+      clean:    ['✅ 乾淨（單一身份）', '#dcfce7', '#166534'],
+      mixed:    ['⚠️ 疑似混人',        '#fee2e2', '#b91c1c'],
+      broken:   ['💥 參考不可用',      '#fef3c7', '#92400e'],
+      unclear:  ['❓ 模糊',             '#e5e7eb', '#374151'],
+    };
+    const [vLabel, vBg, vFg] = VERDICT_STYLE[d.verdict] || ['?','#e5e7eb','#374151'];
+    const vBadge = '<span style="padding:4px 10px;border-radius:12px;font-size:.82em;background:'
+                  +vBg+';color:'+vFg+';margin-left:8px">'+vLabel+'</span>';
+
+    const s = d.sim_stats || {};
+    html += '<div style="background:rgba(100,150,255,0.06);padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.9em">'
+         +    '<div style="margin-bottom:6px"><b>model:</b> <code>'+(d.model_id||'?')+'</code>'
+         +    ' &nbsp;<b>photos:</b> '+d.n_photos
+         +    ' &nbsp;<b>clusters:</b> '+d.n_clusters
+         +    ' &nbsp;<b>dominant:</b> '+Math.round(d.dominant_fraction*100)+'%'
+         +    vBadge + '</div>'
+         +    '<div style="font-size:.85em;color:var(--txt2)">'
+         +      '<b>sim:</b> mean='+(s.mean??'?')+' std='+(s.std??'?')
+         +      ' p5='+(s.p5??'?')+' p95='+(s.p95??'?')
+         +      ' &nbsp;<b>silhouette:</b> '+(d.silhouette??'n/a')
+         +    '</div>'
+         +    (d.verdict_reason
+            ? '<div style="font-size:.82em;color:var(--txt2);margin-top:4px;font-style:italic">'+d.verdict_reason+'</div>'
+            : '')
+         + '</div>';
+    if(!d.clusters || !d.clusters.length){
+      html += '<div style="padding:20px;color:var(--txt2)">沒有偵測到任何 cluster（全部 noise）</div>';
+    }else{
+      for(const [i, c] of d.clusters.entries()){
+        const isMain = (i === 0);
+        const color = isMain ? '#166534' : '#b91c1c';
+        const bg = isMain ? '#dcfce7' : '#fee2e2';
+        html += '<div style="margin-bottom:14px;border:1px solid '+color+'40;border-radius:8px;padding:10px">'
+             +    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
+             +      '<span style="padding:2px 10px;border-radius:10px;font-size:.8em;background:'+bg+';color:'+color+'">cluster #'+c.label+'</span>'
+             +      '<span style="font-size:.85em"><b>'+c.size+'</b> photos ('+Math.round(c.fraction*100)+'%)</span>'
+             +      '<span style="font-size:.82em;color:var(--txt2)">cohesion '+c.cohesion.toFixed(3)+'</span>'
+             +      '<span style="flex:1"></span>'
+             +      (isMain ? '' : '<span style="font-size:.78em;color:#b91c1c">← 可能是另一個人</span>')
+             +    '</div>'
+             +    '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+        for(const fn of (c.example_files||[])){
+          const u = '/photos/'+encodeURIComponent(folder)+'/'+encodeURIComponent(fn);
+          html += '<img src="'+u+'" loading="lazy" style="width:64px;height:64px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="document.getElementById(\'lightbox-img\').src=this.src; document.getElementById(\'lightbox\').classList.add(\'show\')" title="'+fn+'">';
+        }
+        html += '</div></div>';
+      }
+    }
+    html += '<div style="text-align:right;margin-top:8px"><button class="btn" style="font-size:.82em;padding:4px 12px" onclick="openClusterAuditForce(\''+encodeURIComponent(folder)+'\')">🔄 強制 rebuild + 重新 audit</button></div>';
+    body.innerHTML = html;
+  }catch(e){
+    body.innerHTML = '<div style="padding:20px;color:#b91c1c">載入失敗: '+e+'</div>';
+  }
+}
+async function openClusterAuditForce(folderEnc){
+  const folder = decodeURIComponent(folderEnc);
+  const body = document.getElementById('ca-body');
+  body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--txt2)">強制 rebuild + 聚類中（約需 10–15 秒）…</div>';
+  try{
+    const r = await fetch('/api/photos-cluster-audit/' + encodeURIComponent(folder) + '?force=1');
+    // 直接重新 render
+    await r.json();
+    openClusterAudit(folderEnc);
+  }catch(e){
+    body.innerHTML = '<div style="padding:20px;color:#b91c1c">載入失敗: '+e+'</div>';
+  }
+}
+
 // 初始化
 loadCelebs();
 fetch('/api/stats').then(r=>r.json()).then(d=>{
@@ -8317,15 +12591,32 @@ fetch('/api/stats').then(r=>r.json()).then(d=>{
       if(!t.label) return;
       const tc = _avCreateTaskCard(t.label);
       document.getElementById('av-tasks-container').prepend(tc.card);
+      // 綁上 task_id 讓叉叉按鈕能呼叫 /dismiss/<id> 清掉歷史
+      tc._taskId = t.task_id;
       if(t.status === 'done' && t.data && t.data.file_url){
         // 已完成 — 直接顯示結果
         tc.bar.style.width = '100%';
         tc.pct.textContent = '100%';
         tc.title.textContent = '🎉 完成！ — '+t.label;
         tc.title.style.color = 'var(--ok)';
+        tc._finished = true;
+        _avStopTimer(tc);
+        if(tc.stopBtn){ tc.stopBtn.style.display = 'none'; }
         const d = t.data;
-        tc.msg.innerHTML = '✅ <a href="'+d.file_url+'" target="_blank" style="color:var(--pri);font-weight:600">'
-          +d.filename+'</a> ('+d.file_size_mb+'MB)';
+        // 記下 person 才能建漂亮檔名 URL（`Jisoo #Jisoo #blackpink #지수.mp4`）
+        tc.person = d.person || '';
+        const _dlUrl = _avBuildDownloadUrl(d.file_url, tc.person, d.filename);
+        const _prettyName = (() => {
+          try{
+            const u = new URL(_dlUrl, window.location.origin);
+            return u.searchParams.get('dl') || d.filename;
+          }catch(_){ return d.filename; }
+        })();
+        const _prettyAttr = _prettyName.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+        tc._downloadUrl = _dlUrl;
+        tc._downloadName = _prettyName;
+        tc.msg.innerHTML = '✅ <a href="'+_dlUrl+'" download="'+_prettyAttr+'" target="_blank" style="color:var(--pri);font-weight:600">'
+          +_prettyName+'</a> ('+d.file_size_mb+'MB)';
         tc.result.style.display = '';
         tc.result.innerHTML =
           '<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:.85em;margin-bottom:8px">'
@@ -8335,7 +12626,7 @@ fetch('/api/stats').then(r=>r.json()).then(d=>{
           +'<video src="'+d.file_url+'" controls style="max-width:100%;max-height:400px;border-radius:12px"></video>'
           + _avRenderCaption(d)
           +'<div style="display:flex;gap:8px;margin-top:8px">'
-          +'<a href="'+d.file_url+'" download class="btn btn-pri" style="font-size:.85em">⬇️ 下載影片</a>'
+          +'<a href="'+_dlUrl+'" download="'+_prettyAttr+'" class="btn btn-pri" style="font-size:.85em">⬇️ 下載影片</a>'
           +'<button class="btn" style="font-size:.85em;background:#fee2e2;color:#dc2626;border:1px solid #fca5a5" '
           +'onclick="_avDeleteOutput(this,\''+d.rel_path+'\')">🗑️ 刪除影片</button>'
           +'<button class="btn btn-sec" style="font-size:.85em" '
@@ -8345,12 +12636,16 @@ fetch('/api/stats').then(r=>r.json()).then(d=>{
         tc.title.style.color = 'var(--err)';
         tc.msg.textContent = '❌ '+(t.data.message||'');
         tc.msg.style.color = 'var(--err)';
+        tc._finished = true;
+        _avStopTimer(tc);
+        if(tc.stopBtn){ tc.stopBtn.style.display = 'none'; }
       }else{
         // 進行中 — 重新連接 SSE
         tc.msg.textContent = '🔄 重新連線中...';
         _avListenSSE(t.task_id, tc, t.label);
       }
     });
+    _avUpdateBatchDownloadBtn();
   }catch(e){}
 })();
 
@@ -9640,6 +13935,8 @@ async function ytHighlight(){
     resolution: document.getElementById('hl-resolution').value,
     audio_mode: document.getElementById('hl-audio-mode').value,
   };
+  bgmInjectOpts('hl', opts);
+  _injectAdvOpts('hl', opts);
   if(selectedVideos) opts.videos = selectedVideos;
 
   document.getElementById('btn-highlight').disabled = true;
@@ -9723,6 +14020,35 @@ function _avGetResolution(){
   return orient === 'vertical' ? res+'p_v' : res+'p';
 }
 
+// 平台 chip：全選 / 全不選切換；chip 高亮
+function _avPlatToggleAll(){
+  const cbs = document.querySelectorAll('.av-plat');
+  const allOn = Array.from(cbs).every(c=>c.checked);
+  cbs.forEach(c=>{ c.checked = !allOn; });
+  _avPlatRefreshChips();
+}
+function _avPlatRefreshChips(){
+  document.querySelectorAll('.av-plat').forEach(cb=>{
+    const lab = cb.closest('label');
+    if(!lab) return;
+    if(cb.checked){
+      lab.style.background = 'var(--pri-bg, #dbeafe)';
+      lab.style.borderColor = 'var(--pri, #3b82f6)';
+      lab.style.color = 'var(--pri, #1d4ed8)';
+    } else {
+      lab.style.background = 'var(--bg2)';
+      lab.style.borderColor = 'var(--brd)';
+      lab.style.color = '';
+    }
+  });
+}
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.querySelectorAll('.av-plat').forEach(cb=>{
+    cb.addEventListener('change', _avPlatRefreshChips);
+  });
+  _avPlatRefreshChips();
+});
+
 function avSourceChanged(){
   const isLocal = document.getElementById('av-source').value === 'local';
   document.getElementById('av-platform-wrap').style.display = isLocal ? 'none' : '';
@@ -9750,29 +14076,175 @@ function avAutoModeChanged(){
   if(det) det.style.pointerEvents = on ? 'none' : '';
 }
 
-const AV_GROUPS = {
-  'Fromis_9':    ['HaYoung'],
-  'IVE':         ['WonYoung', 'AnYuJin', 'Leeseo', 'Liz'],
-  'Babymonster': ['Ahyeon'],
-  'IU':          ['IU'],
-  'QWER':        ['chodan'],
-  'Illit':       ['WonHee'],
-  'H2H':         ['Ian', 'jiwoo'],
-  'aespa':       ['karina', 'winter'],
-  'ITZY':        ['Yuna'],
-};
+// AV_GROUPS / AV_KO_NAMES 在 server-side 由 data/groups.json 注入
+// Canonical source: data/groups.json（前後端共用的 single source of truth）
+const AV_GROUPS = __AV_GROUPS_JSON__;
+
+// 韓文藝名 — 從 data/groups.json 注入（server-side template substitution）
+const AV_KO_NAMES = __AV_KO_NAMES_JSON__;
+
+// ── 衝突名字：同名於多團時以 `Person_GroupSlug` 當 folder key ──
+// AV_NAME_GROUPS: person → [group1, group2, ...] 供偵測衝突
+const AV_NAME_GROUPS = {};
+for(const [g, members] of Object.entries(AV_GROUPS)){
+  for(const m of members){
+    (AV_NAME_GROUPS[m] = AV_NAME_GROUPS[m] || []).push(g);
+  }
+}
+function _avGroupSlug(g){ return (g||'').replace(/[^A-Za-z0-9]/g, ''); }
+
+// 給 (person, group) 產 folder key：衝突名字才加後綴，其他保留原名
+function _avPersonKey(person, group){
+  if((AV_NAME_GROUPS[person] || []).length >= 2){
+    return person + '_' + _avGroupSlug(group);
+  }
+  return person;
+}
+
+// 把 key 拆回 {person, group}；非衝突 key 維持 {key, ''}
+function _avSplitKey(key){
+  if(!key || !key.includes('_')) return { person: key || '', group: '' };
+  const idx = key.lastIndexOf('_');
+  const head = key.slice(0, idx);
+  const slug = key.slice(idx + 1);
+  if((AV_NAME_GROUPS[head] || []).length >= 2){
+    for(const g of Object.keys(AV_GROUPS)){
+      if(_avGroupSlug(g) === slug) return { person: head, group: g };
+    }
+  }
+  return { person: key, group: '' };
+}
+function _avDisplayName(key){ return _avSplitKey(key).person; }
+
+function _avFindGroup(key){
+  const {person, group} = _avSplitKey(key);
+  if(group) return group;  // key 已經編碼 group
+  if(!person) return '';
+  const p = person.toLowerCase();
+  for(const [g, members] of Object.entries(AV_GROUPS)){
+    if(members.some(m => m.toLowerCase() === p)) return g;
+  }
+  return '';
+}
+
+// 完成通知 — 永遠會嗶+閃標題+頁內橫幅；有權限時再加桌面通知
+// (HTTP 非 localhost 站點 Chrome 會擋 Notification API，所以頁內提示是主要管道)
+function _avBeep(){
+  try{
+    const ac = new (window.AudioContext||window.webkitAudioContext)();
+    [880, 1320].forEach((hz, i) => {
+      const o = ac.createOscillator(); const g = ac.createGain();
+      o.frequency.value = hz; o.connect(g); g.connect(ac.destination);
+      const t0 = ac.currentTime + i*0.18;
+      g.gain.setValueAtTime(0.25, t0);
+      g.gain.exponentialRampToValueAtTime(0.01, t0 + 0.25);
+      o.start(t0); o.stop(t0 + 0.25);
+    });
+  }catch(_){}
+}
+let _avTitleFlashTimer = null;
+function _avFlashTitle(msg){
+  try{
+    if(_avTitleFlashTimer){ clearInterval(_avTitleFlashTimer); _avTitleFlashTimer=null; }
+    const orig = document.title;
+    let on = false;
+    _avTitleFlashTimer = setInterval(() => {
+      document.title = on ? orig : ('🎉 ' + msg);
+      on = !on;
+    }, 900);
+    // 停止條件：分頁重獲焦點 或 30 秒後自動停
+    const stop = () => {
+      if(_avTitleFlashTimer){ clearInterval(_avTitleFlashTimer); _avTitleFlashTimer=null; }
+      document.title = orig;
+      document.removeEventListener('visibilitychange', onVis);
+    };
+    const onVis = () => { if(document.visibilityState==='visible') stop(); };
+    document.addEventListener('visibilitychange', onVis);
+    setTimeout(stop, 30000);
+  }catch(_){}
+}
+function _avToast(title, body, url){
+  try{
+    let host = document.getElementById('av-toast-host');
+    if(!host){
+      host = document.createElement('div');
+      host.id = 'av-toast-host';
+      host.style.cssText = 'position:fixed;top:16px;right:16px;z-index:99999;display:flex;flex-direction:column;gap:8px;max-width:360px;';
+      document.body.appendChild(host);
+    }
+    const t = document.createElement('div');
+    t.style.cssText = 'background:#1f6feb;color:#fff;padding:12px 14px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);font:14px system-ui,sans-serif;cursor:pointer;opacity:0;transition:opacity .25s;';
+    const titleEl = document.createElement('div');
+    titleEl.style.cssText = 'font-weight:600;margin-bottom:4px;';
+    titleEl.textContent = title;
+    const bodyEl = document.createElement('div');
+    bodyEl.style.cssText = 'font-size:13px;opacity:.95;word-break:break-all;';
+    bodyEl.textContent = body || '';
+    t.appendChild(titleEl); t.appendChild(bodyEl);
+    const close = () => { t.style.opacity='0'; setTimeout(()=>t.remove(), 300); };
+    t.onclick = () => { if(url){ window.open(url, '_blank'); } close(); };
+    host.appendChild(t);
+    requestAnimationFrame(() => { t.style.opacity='1'; });
+    setTimeout(close, 12000);
+  }catch(_){}
+}
+function _avNotify(title, body, url){
+  _avBeep();
+  _avFlashTitle(title);
+  _avToast(title, body, url);
+  try{
+    if(!('Notification' in window)) return;
+    const fire = () => {
+      try{
+        const n = new Notification(title, { body: body, tag: 'auto-video', icon: '/favicon.ico' });
+        if(url){ n.onclick = () => { window.focus(); n.close(); }; }
+      }catch(_){}
+    };
+    if(Notification.permission === 'granted'){ fire(); }
+    else if(Notification.permission !== 'denied'){
+      Notification.requestPermission().then(p => { if(p==='granted') fire(); });
+    }
+  }catch(_){}
+}
+
+function _avBuildDownloadUrl(fileUrl, personKey, filename){
+  if(!fileUrl) return fileUrl;
+  const ext = (filename && filename.includes('.')) ? filename.slice(filename.lastIndexOf('.')) : '.mp4';
+  if(!personKey) return fileUrl;
+  // 衝突名字：key 長 "Chaeyoung_TWICE" → 檔名、hashtag 都用顯示名
+  const {person, group: groupFromKey} = _avSplitKey(personKey);
+  const group = groupFromKey || _avFindGroup(person);
+  // 韓文：先查完整 key（允許 `Chaeyoung_TWICE` 用不同韓文），沒有再 fallback 到顯示名
+  const ko = AV_KO_NAMES[personKey]
+    || AV_KO_NAMES[person]
+    || AV_KO_NAMES[person.charAt(0).toUpperCase()+person.slice(1).toLowerCase()]
+    || '';
+  const parts = [person, '#'+person];
+  if(group) parts.push('#'+group.toLowerCase());
+  if(ko) parts.push('#'+ko);
+  const pretty = parts.join(' ') + ext;
+  const sep = fileUrl.includes('?') ? '&' : '?';
+  return fileUrl + sep + 'dl=' + encodeURIComponent(pretty);
+}
 
 function avGroupChanged(){
   const g = document.getElementById('av-group').value;
   const sel = document.getElementById('av-person');
   sel.innerHTML = '<option value="">-- 選成員 --</option>';
   if(!g || !AV_GROUPS[g]) return;
+  if(AV_GROUPS[g].length > 1){
+    const allOpt = document.createElement('option');
+    allOpt.value = '__ALL__'; allOpt.textContent = '全團員';
+    sel.appendChild(allOpt);
+  }
   for(const m of AV_GROUPS[g]){
     const opt = document.createElement('option');
-    opt.value = m; opt.textContent = m;
+    // 衝突名字（如 Chaeyoung）value 會變成 "Chaeyoung_TWICE"，顯示仍是 "Chaeyoung"
+    opt.value = _avPersonKey(m, g);
+    opt.textContent = m;
     sel.appendChild(opt);
   }
-  if(AV_GROUPS[g].length === 1){ sel.value = AV_GROUPS[g][0]; }
+  if(AV_GROUPS[g].length === 1){ sel.value = _avPersonKey(AV_GROUPS[g][0], g); }
 }
 
 (function avInitGroupOptions(){
@@ -9783,21 +14255,180 @@ function avGroupChanged(){
     opt.value = g; opt.textContent = g;
     sel.appendChild(opt);
   }
+  sel.value = 'IVE';
+  avGroupChanged();
+  const psel = document.getElementById('av-person');
+  const _leeseoKey = _avPersonKey('Leeseo', 'IVE');
+  if(psel && [...psel.options].some(o=>o.value===_leeseoKey)) psel.value = _leeseoKey;
 })();
 
 async function autoVideoStart(preview){
   const person = document.getElementById('av-person').value.trim();
-  if(!person) return alert('請輸入人物名稱');
+  const group  = document.getElementById('av-group').value.trim();
+  const modeSel = document.getElementById('av-multi-mode');
+  const multiMode = modeSel ? modeSel.value : 'parallel';
 
+  // 「全團員」或無人名但有選團 → 多人執行（並行或依序，由 av-multi-mode 決定）
+  if(!person || person === '__ALL__'){
+    if(!group || !AV_GROUPS[group]){
+      return alert('請選擇團體或成員');
+    }
+    const members = AV_GROUPS[group];
+    const modeLabel = (multiMode === 'sequential') ? '依序（一個接一個）' : '並行（同時跑）';
+    if(!confirm(`將為 ${group} 的 ${members.length} 位成員各生成一支影片\n執行模式：${modeLabel}\n\n確定？`)) return;
+
+    if(multiMode === 'sequential'){
+      // 依序：等前一位完成（或失敗）再啟動下一位
+      for(const m of members){
+        try{ await _avLaunchOne(_avPersonKey(m, group), preview); }
+        catch(_){ /* 單一成員失敗不擋後續 */ }
+      }
+    } else {
+      // 並行：一次全部啟動（沿用原行為）
+      for(const m of members){
+        _avLaunchOne(_avPersonKey(m, group), preview);
+      }
+    }
+    return;
+  }
+  _avLaunchOne(person, preview);
+}
+
+// ============================================================
+// 封面圖挑選：從照片資料庫挑一張當影片開場（TikTok/YT 會用它當縮圖）
+// ============================================================
+async function _avOpenCoverPicker(){
+  const psel = document.getElementById('av-person');
+  const gsel = document.getElementById('av-group');
+  let person = (psel && psel.value || '').trim();
+  const group = (gsel && gsel.value || '').trim();
+
+  // 若選了「全團員」或空白，要求先指定一位成員（預設用團體的第一位）
+  if(!person || person === '__ALL__'){
+    if(group && AV_GROUPS[group] && AV_GROUPS[group].length){
+      const first = AV_GROUPS[group][0];
+      if(!confirm('目前選的是「全團員」模式，封面圖需要指定成員。\n要用「'+first+'」的照片庫來挑嗎？\n（封面會套用到每一位成員的影片）')) return;
+      person = _avPersonKey(first, group);  // 衝突名字的 key
+    } else {
+      alert('請先在上方選擇成員（或團體），才能從對應的照片庫挑封面');
+      return;
+    }
+  }
+
+  // 建立/重用 modal
+  let modal = document.getElementById('av-cover-modal');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'av-cover-modal';
+    modal.className = 'modal';
+    modal.innerHTML =
+      '<div class="modal-box" style="max-width:900px">'
+      + '<div class="modal-head">'
+      +   '<h3 id="av-cover-modal-title">挑選封面圖</h3>'
+      +   '<span id="av-cover-modal-count" style="font-size:.82em;color:var(--txt2);margin-left:8px"></span>'
+      +   '<button class="modal-close" onclick="closeModal(\'av-cover-modal\')">&times;</button>'
+      + '</div>'
+      + '<div class="modal-body"><div id="av-cover-modal-grid" class="gallery"></div></div>'
+      + '</div>';
+    document.body.appendChild(modal);
+  }
+  document.getElementById('av-cover-modal-title').textContent = _avDisplayName(person) + ' — 挑選封面圖';
+  const grid = document.getElementById('av-cover-modal-grid');
+  grid.innerHTML = '<p style="color:var(--txt2);padding:20px">載入中...</p>';
+  modal.classList.add('show');
+
+  try{
+    const r = await fetch('/api/images/' + encodeURIComponent(person));
+    const imgs = await r.json();
+    grid.innerHTML = '';
+    document.getElementById('av-cover-modal-count').textContent = imgs.length + ' 張';
+    if(!imgs.length){
+      grid.innerHTML = '<p style="color:var(--txt2);padding:20px">此成員尚無照片，請先到照片庫下載</p>';
+      return;
+    }
+    imgs.forEach(img => {
+      const div = document.createElement('div');
+      div.style.cssText = 'cursor:pointer;position:relative;transition:transform .15s';
+      div.onmouseover = function(){ this.style.transform='scale(1.04)'; };
+      div.onmouseout  = function(){ this.style.transform='scale(1)'; };
+      div.innerHTML = '<img src="'+img.url+'" loading="lazy" style="pointer-events:none">'
+        + '<div class="gallery-info">'+img.filename+' ('+img.size_kb+'KB)</div>';
+      div.onclick = function(){
+        // 記住挑選：用相對於資料庫的路徑（/photos/<celeb>/<file>），後端會解析
+        // 注意：不對 person 做 urlencode，後端是直接以 JSON 字串比對檔案系統路徑
+        const hidden = document.getElementById('av-cover-filename');
+        hidden.value = '/photos/' + person + '/' + img.filename;
+        hidden.dataset.person = person;
+        // 更新狀態 pill
+        const thumb = document.getElementById('av-cover-thumb');
+        thumb.src = img.url;
+        thumb.style.display = '';
+        document.getElementById('av-cover-status-icon').textContent = '🖼️';
+        document.getElementById('av-cover-status-text').textContent = _avDisplayName(person) + ' / ' + img.filename;
+        document.getElementById('av-cover-status').style.background = 'rgba(100,150,255,0.12)';
+        document.getElementById('av-cover-status').style.borderStyle = 'solid';
+        document.getElementById('av-cover-status').style.borderColor = 'var(--pri)';
+        document.getElementById('av-cover-reset').style.display = '';
+        closeModal('av-cover-modal');
+      };
+      grid.appendChild(div);
+    });
+  }catch(e){
+    grid.innerHTML = '<p style="color:var(--err);padding:20px">載入失敗：'+e+'</p>';
+  }
+}
+
+function _avClearCover(){
+  // 恢復成「自動挑」模式
+  const hidden = document.getElementById('av-cover-filename');
+  hidden.value = '__auto__';
+  delete hidden.dataset.person;
+  const thumb = document.getElementById('av-cover-thumb');
+  thumb.src = '';
+  thumb.style.display = 'none';
+  document.getElementById('av-cover-status-icon').textContent = '🎲';
+  document.getElementById('av-cover-status-text').textContent = '自動挑（隨機一張）';
+  const pill = document.getElementById('av-cover-status');
+  pill.style.background = 'rgba(100,200,100,0.12)';
+  pill.style.borderStyle = 'dashed';
+  pill.style.borderColor = 'rgba(100,200,100,0.4)';
+  document.getElementById('av-cover-reset').style.display = 'none';
+}
+
+async function _avLaunchOne(person, preview){
+  // 第一次啟動任務時順便請求通知權限
+  try{
+    if('Notification' in window && Notification.permission === 'default'){
+      Notification.requestPermission();
+    }
+  }catch(_){}
   const source = document.getElementById('av-source').value;
   const keyword = document.getElementById('av-keyword').value.trim();
   const autoMode = document.getElementById('av-auto-mode').checked;
   const outputPreset = document.getElementById('av-output-preset').value;
+
+  // 封面圖：預設為 __auto__（自動挑第一張照片）
+  const _coverHidden = document.getElementById('av-cover-filename');
+  const _coverVal = _coverHidden ? (_coverHidden.value || '').trim() : '';
+  // 注意：不能用 `|| 1.0` 因為 0 是合法值（僅縮圖模式）
+  let _coverDur = 0;
+  try{
+    const _cd = document.getElementById('av-cover-dur');
+    if(_cd){
+      const _parsed = parseFloat(_cd.value);
+      _coverDur = isNaN(_parsed) ? 0 : _parsed;
+    }
+  }catch(_){}
+
+  // 平台：checkbox chip 組，複選時送 platforms[] 陣列；一個時送 platform 字串相容舊 API
+  const _platChecked = Array.from(document.querySelectorAll('.av-plat:checked')).map(cb=>cb.value);
+  const _platSingle = _platChecked.length === 1 ? _platChecked[0] : (_platChecked.length === 0 ? 'yt_shorts' : 'all');
   const opts = {
     person: person,
     source: source,
     search_keyword: keyword,
-    platform: document.getElementById('av-platform').value,
+    platform: _platSingle,
+    platforms: _platChecked,
     max_videos: parseInt(document.getElementById('av-max-videos').value),
     strategy: document.getElementById('av-strategy').value,
     clip_duration: parseFloat(document.getElementById('av-clip-dur').value),
@@ -9810,31 +14441,42 @@ async function autoVideoStart(preview){
     preview: !!preview,
     auto_mode: autoMode,
     output_preset: outputPreset,
+    cover_photo: _coverVal,
+    cover_duration: _coverDur,
   };
+  bgmInjectOpts('av', opts);
+  _injectAdvOpts('av', opts);
 
-  // 建立任務卡片
-  const taskLabel = person + (keyword ? ' ('+keyword+')' : '') + (preview ? ' [挑選模式]' : '');
+  // 顯示用脫掉衝突後綴（`Chaeyoung_TWICE` → `Chaeyoung (TWICE)`），API 仍傳完整 key
+  const _disp = _avDisplayName(person);
+  const _grpLabel = (_avSplitKey(person).group) ? ' ('+_avSplitKey(person).group+')' : '';
+  const taskLabel = _disp + _grpLabel + (keyword ? ' ('+keyword+')' : '') + (preview ? ' [挑選模式]' : '');
   const taskCard = _avCreateTaskCard(taskLabel);
+  taskCard.person = person;
   document.getElementById('av-tasks-container').prepend(taskCard.card);
   taskCard.card.scrollIntoView({behavior:'smooth', block:'center'});
 
-  try{
-    const r = await fetch('/api/auto-video',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(opts)
-    });
-    const d = await r.json();
-    if(d.error){
-      taskCard.msg.textContent = '❌ '+d.error;
+  // 回傳 Promise：在 SSE 的 done / error / 連線中斷時 resolve，讓依序模式能 await
+  return new Promise(async (resolve)=>{
+    try{
+      const r = await fetch('/api/auto-video',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(opts)
+      });
+      const d = await r.json();
+      if(d.error){
+        taskCard.msg.textContent = '❌ '+d.error;
+        taskCard.msg.style.color = 'var(--err)';
+        taskCard.title.textContent = '❌ '+taskLabel+' — 失敗';
+        return resolve({ok:false, error:d.error});
+      }
+      _avListenSSE(d.task_id, taskCard, taskLabel, resolve);
+    }catch(e){
+      taskCard.msg.textContent = '連線失敗: '+e;
       taskCard.msg.style.color = 'var(--err)';
-      taskCard.title.textContent = '❌ '+taskLabel+' — 失敗';
-      return;
+      resolve({ok:false, error:String(e)});
     }
-    _avListenSSE(d.task_id, taskCard, taskLabel);
-  }catch(e){
-    taskCard.msg.textContent = '連線失敗: '+e;
-    taskCard.msg.style.color = 'var(--err)';
-  }
+  });
 }
 
 let _avTaskCounter = 0;
@@ -9846,6 +14488,134 @@ const _avPhaseLabels = {
   highlight: '🎬 剪輯中',
 };
 
+function _avFormatElapsed(sec){
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? (h + ':' + pad(m) + ':' + pad(s)) : (pad(m) + ':' + pad(s));
+}
+
+async function _avStopOne(taskId, btn){
+  if(!taskId) return;
+  try{
+    if(btn){ btn.disabled = true; btn.textContent = '⏳ 中止中...'; }
+    const r = await fetch('/api/auto-video/stop/' + encodeURIComponent(taskId), {method:'POST'});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok || d.error){
+      if(btn){ btn.disabled = false; btn.textContent = '⏹ 中止'; }
+      alert('中止失敗：' + (d.error || r.status));
+    }
+    // 成功時 SSE 會收到 cancelled 事件並更新卡片
+  }catch(e){
+    if(btn){ btn.disabled = false; btn.textContent = '⏹ 中止'; }
+    alert('中止失敗：' + e);
+  }
+}
+
+async function _avStopAll(){
+  if(!confirm('中止所有進行中的一鍵影片任務？')) return;
+  const allBtn = document.getElementById('btn-av-stop-all');
+  try{
+    if(allBtn){ allBtn.disabled = true; allBtn.textContent = '⏳ 中止中...'; }
+    const r = await fetch('/api/auto-video/stop-all', {method:'POST'});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      alert('中止失敗：' + (d.error || r.status));
+    }
+  }catch(e){
+    alert('中止失敗：' + e);
+  }finally{
+    if(allBtn){
+      setTimeout(()=>{
+        allBtn.disabled = false;
+        allBtn.textContent = '⏹ 一鍵中止';
+      }, 1500);
+    }
+  }
+}
+
+// 追蹤當前畫面上所有 task 卡片（running + finished），供「一鍵下載全部」判斷批次是否全部完成
+const _avAllCards = new Set();
+
+function _avUpdateBatchDownloadBtn(){
+  const btn = document.getElementById('btn-av-download-all');
+  if(!btn) return;
+  if(_avAllCards.size === 0){ btn.style.display = 'none'; return; }
+  let allDone = true, successCount = 0;
+  for(const tc of _avAllCards){
+    if(!tc._finished){ allDone = false; }
+    else if(tc._downloadUrl){ successCount++; }
+  }
+  if(allDone && successCount > 0){
+    btn.style.display = '';
+    btn.disabled = false;
+    btn.textContent = '⬇ 一鍵下載全部 (' + successCount + ')';
+  }else{
+    btn.style.display = 'none';
+  }
+}
+
+async function _avDownloadAllAndClear(){
+  const btn = document.getElementById('btn-av-download-all');
+  const cards = Array.from(_avAllCards).filter(tc => tc._finished && tc._downloadUrl);
+  if(cards.length === 0){
+    if(btn) btn.style.display = 'none';
+    return;
+  }
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ 下載中 0/' + cards.length; }
+  for(let i = 0; i < cards.length; i++){
+    const tc = cards[i];
+    if(btn){ btn.textContent = '⏳ 下載中 ' + (i+1) + '/' + cards.length; }
+    try{
+      const a = document.createElement('a');
+      a.href = tc._downloadUrl;
+      if(tc._downloadName){ a.download = tc._downloadName; }
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }catch(_){ }
+    // 間隔避免瀏覽器阻擋多重下載
+    await new Promise(r => setTimeout(r, 500));
+  }
+  // 給瀏覽器一點時間啟動最後一個下載，再清除卡片
+  await new Promise(r => setTimeout(r, 600));
+  for(const tc of cards){
+    const card = tc.card;
+    if(card){
+      card.style.transition = 'opacity .3s, transform .3s';
+      card.style.opacity = '0';
+      card.style.transform = 'translateX(30px)';
+    }
+    _avAllCards.delete(tc);
+  }
+  setTimeout(() => {
+    for(const tc of cards){
+      if(tc.card && tc.card.parentNode) tc.card.parentNode.removeChild(tc.card);
+    }
+    _avUpdateBatchDownloadBtn();
+  }, 350);
+}
+
+function _avStartTimer(tc){
+  if(tc._timerInterval) return;
+  tc._startAt = Date.now();
+  const _tick = () => {
+    if(!tc._startAt || tc._timerStopped) return;
+    const el = tc.timer;
+    if(el){ el.textContent = '⏱ ' + _avFormatElapsed((Date.now() - tc._startAt)/1000); }
+  };
+  _tick();
+  tc._timerInterval = setInterval(_tick, 1000);
+}
+
+function _avStopTimer(tc){
+  tc._timerStopped = true;
+  if(tc._timerInterval){ clearInterval(tc._timerInterval); tc._timerInterval = null; }
+}
+
 function _avCreateTaskCard(label){
   _avTaskCounter++;
   const id = 'av-task-'+_avTaskCounter;
@@ -9853,16 +14623,18 @@ function _avCreateTaskCard(label){
   card.className = 'card';
   card.id = id;
   card.style.cssText = 'margin-bottom:12px;position:relative';
-  card.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
-    +'<h3 class="av-task-title" style="margin:0">⏳ '+label+'</h3>'
-    +'<button class="av-task-close" onclick="this.closest(\'.card\').style.transition=\'opacity .3s,transform .3s\';this.closest(\'.card\').style.opacity=\'0\';this.closest(\'.card\').style.transform=\'translateX(30px)\';setTimeout(()=>this.closest(\'.card\').remove(),300)" '
-    +'style="background:none;border:none;font-size:1.3em;cursor:pointer;color:var(--txt2);padding:0 4px;line-height:1" title="關閉">&times;</button></div>'
+  card.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap">'
+    +'<h3 class="av-task-title" style="margin:0;flex:1;min-width:200px">⏳ '+label+'</h3>'
+    +'<span class="av-task-timer" style="font-family:Consolas,monospace;font-size:.88em;color:var(--txt2);padding:2px 8px;background:rgba(100,150,255,0.10);border-radius:6px">⏱ 00:00</span>'
+    +'<button class="av-task-stop btn" style="font-size:.78em;padding:4px 10px;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;cursor:pointer" title="中止此任務">⏹ 中止</button>'
+    +'<button class="av-task-close" '
+    +'style="background:none;border:none;font-size:1.3em;cursor:pointer;color:var(--txt2);padding:0 4px;line-height:1" title="關閉（不會中止後端任務）">&times;</button></div>'
     +'<div class="progress-wrap"><div class="progress-bar av-task-bar" style="width:0%"></div>'
     +'<span class="progress-text av-task-pct">0%</span></div>'
     +'<div class="av-task-msg" style="font-size:.88em;color:var(--txt2);margin-top:8px">啟動中...</div>'
     +'<div class="av-task-log" style="max-height:150px;overflow-y:auto;font-family:Consolas,monospace;font-size:.75em;line-height:1.7;padding:6px;background:#F9FAFB;border-radius:8px;margin-top:8px"></div>'
     +'<div class="av-task-result" style="display:none;margin-top:10px"></div>';
-  return {
+  const tc = {
     card: card,
     title: card.querySelector('.av-task-title'),
     bar: card.querySelector('.av-task-bar'),
@@ -9870,12 +14642,58 @@ function _avCreateTaskCard(label){
     msg: card.querySelector('.av-task-msg'),
     log: card.querySelector('.av-task-log'),
     result: card.querySelector('.av-task-result'),
+    timer: card.querySelector('.av-task-timer'),
+    stopBtn: card.querySelector('.av-task-stop'),
+    closeBtn: card.querySelector('.av-task-close'),
+    _taskId: '',
+    _startAt: 0,
+    _timerInterval: null,
+    _timerStopped: false,
+    _finished: false,
   };
+  // 中止按鈕：呼叫後端 stop API（task_id 在 _avListenSSE 拿到時綁上）
+  tc.stopBtn.onclick = () => { _avStopOne(tc._taskId, tc.stopBtn); };
+  // 關閉按鈕：若還在跑，先問要不要中止；否則直接隱藏卡片 + 通知後端清掉歷史
+  tc.closeBtn.onclick = () => {
+    if(!tc._finished && tc._taskId){
+      if(confirm('任務還在跑，要中止並關閉嗎？\n（按取消只會關 UI 卡片，後端仍會繼續跑）')){
+        _avStopOne(tc._taskId, tc.stopBtn);
+        // 後端回 cancelled 後 SSE 會 mark finished，這時再讓使用者手動關閉
+        return;
+      }
+    }
+    // 已完成 / 失敗：叫後端把任務從歷史刪掉，刷新後才不會又跑出來
+    if(tc._finished && tc._taskId){
+      fetch('/api/auto-video/dismiss/'+tc._taskId, {method:'POST'}).catch(()=>{});
+    }
+    _avAllCards.delete(tc);
+    card.style.transition = 'opacity .3s,transform .3s';
+    card.style.opacity = '0';
+    card.style.transform = 'translateX(30px)';
+    setTimeout(() => { card.remove(); _avUpdateBatchDownloadBtn(); }, 300);
+  };
+  _avStartTimer(tc);
+  _avAllCards.add(tc);
+  _avUpdateBatchDownloadBtn();
+  return tc;
 }
 
-function _avListenSSE(taskId, tc, taskLabel){
+function _avListenSSE(taskId, tc, taskLabel, onFinish){
   let lastPhase = '';
+  tc._taskId = taskId;
   const es = new EventSource('/api/auto-video/progress/'+taskId);
+  let _finished = false;
+  const _finish = (result)=>{
+    if(_finished) return;
+    _finished = true;
+    tc._finished = true;
+    _avStopTimer(tc);
+    if(tc.stopBtn){ tc.stopBtn.style.display = 'none'; }
+    if(typeof onFinish === 'function'){
+      try{ onFinish(result); }catch(_){}
+    }
+    try{ _avUpdateBatchDownloadBtn(); }catch(_){}
+  };
   es.onmessage = (e)=>{
     const d = JSON.parse(e.data);
     switch(d.type){
@@ -9921,8 +14739,22 @@ function _avListenSSE(taskId, tc, taskLabel){
         tc.pct.textContent = '100%';
         tc.title.textContent = '🎉 完成！ — '+taskLabel;
         tc.title.style.color = 'var(--ok)';
+        _avNotify('🎉 影片完成', taskLabel + ' — ' + (d.filename||''), d.file_url);
+        const _dlUrl = _avBuildDownloadUrl(d.file_url, tc.person, d.filename);
+        // 顯示漂亮的下載檔名；點檔名連結也觸發下載（走 _dlUrl）
+        const _prettyName = (() => {
+          try{
+            const u = new URL(_dlUrl, window.location.origin);
+            return u.searchParams.get('dl') || d.filename;
+          }catch(_){ return d.filename; }
+        })();
+        // 存到卡片上，供「⬇ 一鍵下載全部」使用
+        tc._downloadUrl = _dlUrl;
+        tc._downloadName = _prettyName;
+        // HTML 屬性用的 escape（替換 " 和 &）
+        const _prettyAttr = _prettyName.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
         tc.msg.innerHTML =
-          '✅ <a href="'+d.file_url+'" target="_blank" style="color:var(--pri);font-weight:600">'+d.filename+'</a>'
+          '✅ <a href="'+_dlUrl+'" download="'+_prettyAttr+'" target="_blank" style="color:var(--pri);font-weight:600">'+_prettyName+'</a>'
           +' ('+d.file_size_mb+'MB)';
         tc.result.style.display = '';
         tc.result.innerHTML =
@@ -9935,7 +14767,7 @@ function _avListenSSE(taskId, tc, taskLabel){
           +'<video src="'+d.file_url+'" controls style="max-width:100%;max-height:400px;border-radius:12px"></video>'
           + _avRenderCaption(d)
           +'<div style="display:flex;gap:8px;margin-top:8px">'
-          +'<a href="'+d.file_url+'" download class="btn btn-pri" style="font-size:.85em">⬇️ 下載影片</a>'
+          +'<a href="'+_dlUrl+'" download="'+_prettyAttr+'" class="btn btn-pri" style="font-size:.85em">⬇️ 下載影片</a>'
           +'<button class="btn" style="font-size:.85em;background:#fee2e2;color:#dc2626;border:1px solid #fca5a5" '
           +'onclick="_avDeleteOutput(this,\''+d.rel_path+'\')">🗑️ 刪除影片</button>'
           +'<button class="btn btn-sec" style="font-size:.85em" '
@@ -9945,9 +14777,24 @@ function _avListenSSE(taskId, tc, taskLabel){
         dline.style.fontWeight = '600';
         dline.textContent = '['+new Date().toTimeString().slice(0,8)+'] ✅ 完成！'+d.filename;
         tc.log.appendChild(dline);
+        _finish({ok:true, filename:d.filename, file_url:d.file_url});
+        break;
+      case 'cancelled':
+        es.close();
+        tc.title.textContent = '⏹ 已中止 — '+taskLabel;
+        tc.title.style.color = 'var(--warn)';
+        tc.msg.textContent = '⏹ ' + (d.message || '使用者中止');
+        tc.msg.style.color = 'var(--warn)';
+        const cline = document.createElement('div');
+        cline.style.color = 'var(--warn)';
+        cline.textContent = '['+new Date().toTimeString().slice(0,8)+'] ⏹ '+(d.message||'使用者中止');
+        tc.log.appendChild(cline);
+        _finish({ok:false, cancelled:true});
         break;
       case 'error':
         es.close();
+        // 中止時後端會先送 cancelled 再送 error，避免 UI 顯示紅色失敗
+        if(tc._finished){ break; }
         tc.title.textContent = '❌ 失敗 — '+taskLabel;
         tc.title.style.color = 'var(--err)';
         tc.msg.textContent = '❌ '+d.message;
@@ -9956,6 +14803,7 @@ function _avListenSSE(taskId, tc, taskLabel){
         eline.style.color = 'var(--err)';
         eline.textContent = '['+new Date().toTimeString().slice(0,8)+'] ❌ '+d.message;
         tc.log.appendChild(eline);
+        _finish({ok:false, error:d.message});
         break;
       case 'heartbeat': break;
     }
@@ -9963,6 +14811,7 @@ function _avListenSSE(taskId, tc, taskLabel){
   es.onerror = ()=>{
     es.close();
     tc.title.textContent = '⚠️ 連線中斷 — '+taskLabel;
+    _finish({ok:false, error:'SSE 連線中斷'});
   };
 }
 
@@ -10414,6 +15263,8 @@ async function cbCompile(){
     transition_dur: 0.5,
     audio_mode: document.getElementById('cb-audio').value,
   };
+  bgmInjectOpts('cb', opts);
+  _injectAdvOpts('cb', opts);
 
   closeModal('clip-browser-modal');
 
@@ -10450,7 +15301,8 @@ async function cbCompile(){
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
     # 設定 file logging（方便遠端除錯）
-    _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_app.log")
+    # log 跟其他 runtime 資料一起放在 APP_DATA_DIR（預設就是 source 旁邊）
+    _log_path = os.environ.get("LOG_PATH", os.path.join(APP_DATA_DIR, "web_app.log"))
     _fh = logging.FileHandler(_log_path, encoding="utf-8", mode="a")
     _fh.setLevel(logging.INFO)
     _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s",

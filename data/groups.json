@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "_comment": "K-pop 團體/成員 canonical data（前後端共用）。修改後需 deploy 才生效。",
+
+  "groups": {
+    "Fromis_9":    {"slug": "fromis_9",    "members": ["Saerom", "Hayoung", "Gyuri", "Jiwon", "Jisun", "Seoyeon", "Chaeyoung", "Nagyung", "Jiheon"]},
+    "IVE":         {"slug": "ive",         "members": ["Yujin", "Gaeul", "Rei", "Wonyoung", "Liz", "Leeseo"]},
+    "Babymonster": {"slug": "babymonster", "members": ["Ruka", "Pharita", "Asa", "Ahyeon", "Rami", "Rora", "Chiquita"]},
+    "IU":          {"slug": "",            "members": ["IU"]},
+    "QWER":        {"slug": "qwer",        "members": ["Chodan", "Magenta", "Hina", "Siyeon"]},
+    "Illit":       {"slug": "illit",       "members": ["Yunah", "Minju", "Moka", "Wonhee", "Iroha"]},
+    "H2H":         {"slug": "h2h",         "members": ["Carmen", "Jiwoo", "Yuha", "Stella", "Juun", "Ana", "Ian", "Yeon"]},
+    "aespa":       {"slug": "aespa",       "members": ["Karina", "Winter", "Giselle", "Ningning"]},
+    "ITZY":        {"slug": "itzy",        "members": ["Yeji", "Lia", "Ryujin", "Chaeryeong", "Yuna"]},
+    "LE_SSERAFIM": {"slug": "lesserafim",  "members": ["Sakura", "Chaewon", "Yunjin", "Kazuha", "Eunchae"]},
+    "BLACKPINK":   {"slug": "blackpink",   "members": ["Jisoo", "Jennie", "Rosé", "Lisa"]},
+    "TWICE":       {"slug": "twice",       "members": ["Nayeon", "Jeongyeon", "Momo", "Sana", "Jihyo", "Mina", "Dahyun", "Chaeyoung", "Tzuyu"]},
+    "NewJeans":    {"slug": "newjeans",    "members": ["Minji", "Hanni", "Danielle", "Haerin", "Hyein"]},
+    "(G)I-DLE":    {"slug": "gidle",       "members": ["Miyeon", "Minnie", "Soyeon", "Yuqi", "Shuhua"]},
+    "Red Velvet":  {"slug": "redvelvet",   "members": ["Irene", "Seulgi", "Wendy", "Joy", "Yeri"]},
+    "NMIXX":       {"slug": "nmixx",       "members": ["Lily", "Haewon", "Sullyoon", "Bae", "Jiwoo", "Kyujin"]},
+    "Apink":       {"slug": "apink",       "members": ["Chorong", "Bomi", "Eunji", "Naeun", "Namjoo", "Hayoung"]}
+  },
+
+  "_ko_names_comment": "韓文藝名規則：有藝名 → 藝名；藝名就是本名 → 完整韓文本名；衝突名（Hayoung / Chaeyoung / Jiwoo）用 Name_GroupSlug key",
+  "ko_names": {
+    "Saerom": "이새롬", "Hayoung": "송하영", "Gyuri": "장규리", "Jiwon": "박지원",
+    "Jisun": "노지선", "Seoyeon": "이서연", "Chaeyoung": "이채영",
+    "Nagyung": "이나경", "Jiheon": "백지헌",
+
+    "Yujin": "안유진", "Gaeul": "김가을", "Rei": "레이",
+    "Wonyoung": "장원영", "Liz": "리즈", "Leeseo": "이서",
+
+    "Ruka": "루카", "Pharita": "파리타", "Asa": "아사", "Ahyeon": "정아현",
+    "Rami": "라미", "Rora": "로라", "Chiquita": "치키타",
+
+    "IU": "아이유",
+
+    "Chodan": "초단", "Magenta": "마젠타", "Hina": "히나", "Siyeon": "이시연",
+
+    "Yunah": "노윤아", "Minju": "박민주", "Moka": "모카",
+    "Wonhee": "이원희", "Iroha": "이로하",
+
+    "Karina": "카리나", "Winter": "윈터", "Giselle": "지젤", "Ningning": "닝닝",
+
+    "Yeji": "황예지", "Lia": "리아", "Ryujin": "신류진",
+    "Chaeryeong": "이채령", "Yuna": "신유나",
+
+    "Sakura": "사쿠라", "Chaewon": "김채원", "Yunjin": "허윤진",
+    "Kazuha": "카즈하", "Eunchae": "홍은채",
+
+    "Carmen": "카르멘", "Jiwoo": "최지우", "Yuha": "유하", "Stella": "스텔라",
+    "Juun": "김주은", "Ana": "에이나", "Ian": "정이안", "Yeon": "예온",
+
+    "Jisoo": "지수", "Jennie": "제니", "Rosé": "로제", "Lisa": "리사",
+
+    "Nayeon": "나연", "Jeongyeon": "정연", "Momo": "모모", "Sana": "사나",
+    "Jihyo": "지효", "Mina": "미나", "Dahyun": "다현",
+    "Chaeyoung_TWICE": "채영", "Chaeyoung_Fromis9": "이채영",
+    "Tzuyu": "쯔위",
+
+    "Minji": "민지", "Hanni": "하니", "Danielle": "다니엘",
+    "Haerin": "해린", "Hyein": "혜인",
+
+    "Miyeon": "미연", "Minnie": "미니", "Soyeon": "소연",
+    "Yuqi": "우기", "Shuhua": "슈화",
+
+    "Irene": "아이린", "Seulgi": "슬기", "Wendy": "웬디", "Joy": "조이", "Yeri": "예리",
+
+    "Lily": "릴리", "Haewon": "해원", "Sullyoon": "설윤", "Bae": "배",
+    "Jiwoo_H2H": "최지우", "Jiwoo_NMIXX": "박지우", "Kyujin": "규진",
+
+    "Chorong": "박초롱", "Bomi": "윤보미", "Eunji": "정은지",
+    "Naeun": "손나은", "Namjoo": "김남주",
+    "Hayoung_Fromis9": "송하영", "Hayoung_Apink": "오하영"
+  },
+
+  "_name_group_overrides_comment": "bare name → group slug 對應：用於處理衝突名 fallback、別名（anyujin）、多拼法（rose/rosé）。Solo 歌手用空字串表示無團。衝突名會被 Name_GroupSlug 形式明確指定。",
+  "name_group_overrides": {
+    "rose": "blackpink",
+    "anyujin": "ive",
+    "iu": "",
+
+    "hayoung": "fromis_9",
+    "hayoung_fromis9": "fromis_9",
+    "hayoung_apink": "apink",
+
+    "jiwoo": "nmixx",
+    "jiwoo_h2h": "h2h",
+    "jiwoo_nmixx": "nmixx",
+
+    "chaeyoung": "twice",
+    "chaeyoung_twice": "twice",
+    "chaeyoung_fromis9": "fromis_9"
+  }
+}

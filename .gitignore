@@ -16,7 +16,8 @@ venv/
 *.sqlite3
 *.log
 *.bak
-data/
+data/*
+!data/groups.json
 app_stdout.log
 app_stderr.log
 
